@@ -1,4 +1,4 @@
-﻿//! `wb-encode`: D3D11 VideoProcessor (BGRA -> NV12, with scaling) feeding a
+//! `wb-encode`: D3D11 VideoProcessor (BGRA -> NV12, with scaling) feeding a
 //! hardware H.264 Media Foundation transform. Low latency, Annex-B output.
 //! Windows only (the whole crate compiles to nothing elsewhere).
 #![cfg(windows)]
@@ -13,23 +13,23 @@ use std::time::{Duration, Instant};
 
 pub use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 
-use windows::core::{GUID, IUnknown, Interface};
+use windows::core::{IUnknown, Interface, GUID};
 use windows::Win32::Foundation::{RECT, TRUE, VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11DeviceContext, ID3D11Multithread, ID3D11VideoContext,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::*;
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 
 /// Encoder configuration. `width`/`height` are the output (encoded) size.
@@ -112,7 +112,9 @@ impl MfGuard {
     fn start() -> Result<Self, EncodeError> {
         // Harmless if COM is already initialised on this thread (RPC_E_CHANGED_MODE).
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        win("MFStartup", unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) })?;
+        win("MFStartup", unsafe {
+            MFStartup(MF_VERSION, MFSTARTUP_FULL)
+        })?;
         Ok(MfGuard)
     }
 }
@@ -147,7 +149,8 @@ pub struct Encoder {
     /// NAL length size used when the transform emits AVCC.
     nal_len: usize,
     frame_dur_100ns: i64,
-    mgr: IMFDXGIDeviceManager,
+    /// Kept alive for the transform's lifetime (the transform references it).
+    _mgr: IMFDXGIDeviceManager,
     _mf: MfGuard,
 }
 
@@ -159,7 +162,7 @@ impl Encoder {
 
         // The DXGI device manager requires a multithread-protected device.
         let mt: ID3D11Multithread = win("QI ID3D11Multithread", device.cast())?;
-        unsafe { mt.SetMultithreadProtected(TRUE) };
+        let _ = unsafe { mt.SetMultithreadProtected(true) };
 
         let dxgi: IDXGIDevice = win("QI IDXGIDevice", device.cast())?;
         let adapter_obj = win("IDXGIDevice::GetAdapter", unsafe { dxgi.GetAdapter() })?;
@@ -196,7 +199,9 @@ impl Encoder {
         win("MFT streaming start", start_stream())?;
 
         let events: IMFMediaEventGenerator = win("QI IMFMediaEventGenerator", mft.cast())?;
-        let out_info = win("GetOutputStreamInfo", unsafe { mft.GetOutputStreamInfo(out_id) })?;
+        let out_info = win("GetOutputStreamInfo", unsafe {
+            mft.GetOutputStreamInfo(out_id)
+        })?;
         let provides_samples =
             out_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
         let out_size = out_info.cbSize.max(cfg.width * cfg.height);
@@ -220,7 +225,7 @@ impl Encoder {
             params: Vec::new(),
             nal_len: 4,
             frame_dur_100ns: 10_000_000 / cfg.fps as i64,
-            mgr,
+            _mgr: mgr,
             _mf: mf,
         };
         let _ = enc.refresh_params();
@@ -243,7 +248,13 @@ impl Encoder {
         }
 
         let nv12 = self.conv.convert(tex)?;
-        let sample = make_sample(&nv12, self.cfg.width, self.cfg.height, pts_us, self.frame_dur_100ns)?;
+        let sample = make_sample(
+            &nv12,
+            self.cfg.width,
+            self.cfg.height,
+            pts_us,
+            self.frame_dur_100ns,
+        )?;
         let r = unsafe { self.mft.ProcessInput(self.in_id, &sample, 0) };
         match r {
             Ok(()) => {}
@@ -280,7 +291,11 @@ impl Encoder {
     }
 
     /// Processes events until `done` holds or `budget` elapses. Returns whether `done` held.
-    fn pump(&mut self, budget: Duration, done: impl Fn(&Encoder) -> bool) -> Result<bool, EncodeError> {
+    fn pump(
+        &mut self,
+        budget: Duration,
+        done: impl Fn(&Encoder) -> bool,
+    ) -> Result<bool, EncodeError> {
         let deadline = Instant::now() + budget;
         loop {
             if done(self) {
@@ -329,7 +344,10 @@ impl Encoder {
                 buf.pSample = ManuallyDrop::new(Some(s));
             }
             let mut status = 0u32;
-            let r = unsafe { self.mft.ProcessOutput(0, 1, &mut buf, &mut status) };
+            let r = unsafe {
+                self.mft
+                    .ProcessOutput(0, std::slice::from_mut(&mut buf), &mut status)
+            };
             let sample = unsafe { ManuallyDrop::take(&mut buf.pSample) };
             drop(unsafe { ManuallyDrop::take(&mut buf.pEvents) });
             match r {
@@ -450,8 +468,10 @@ fn validate(cfg: &EncoderConfig) -> Result<(), EncodeError> {
     if cfg.width == 0 || cfg.height == 0 || cfg.fps == 0 || cfg.bitrate_kbps == 0 {
         return Err(EncodeError::Config("all fields must be non-zero".into()));
     }
-    if cfg.width % 2 != 0 || cfg.height % 2 != 0 {
-        return Err(EncodeError::Config("NV12 needs even width and height".into()));
+    if !cfg.width.is_multiple_of(2) || !cfg.height.is_multiple_of(2) {
+        return Err(EncodeError::Config(
+            "NV12 needs even width and height".into(),
+        ));
     }
     Ok(())
 }
@@ -494,7 +514,9 @@ fn enum_encoders(luid: u64) -> Result<Vec<IMFActivate>, EncodeError> {
 
     let attrs = {
         let mut a: Option<IMFAttributes> = None;
-        win("MFCreateAttributes", unsafe { MFCreateAttributes(&mut a, 1) })?;
+        win("MFCreateAttributes", unsafe {
+            MFCreateAttributes(&mut a, 1)
+        })?;
         a.ok_or_else(|| EncodeError::Config("MFCreateAttributes returned nothing".into()))?
     };
     win("IMFAttributes::SetUINT64(MFT_ENUM_ADAPTER_LUID)", unsafe {
@@ -552,8 +574,12 @@ fn setup_transform(
     mgr: &IMFDXGIDeviceManager,
     cfg: &EncoderConfig,
 ) -> Result<(IMFTransform, u32, u32), EncodeError> {
-    let mft: IMFTransform = win("IMFActivate::ActivateObject", unsafe { act.ActivateObject() })?;
-    let attrs = win("IMFTransform::GetAttributes", unsafe { mft.GetAttributes() })?;
+    let mft: IMFTransform = win("IMFActivate::ActivateObject", unsafe {
+        act.ActivateObject()
+    })?;
+    let attrs = win("IMFTransform::GetAttributes", unsafe {
+        mft.GetAttributes()
+    })?;
     win("MF_TRANSFORM_ASYNC_UNLOCK", unsafe {
         attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
     })?;
@@ -566,8 +592,12 @@ fn setup_transform(
         mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, mgr_ptr)
     })?;
 
-    let (mut in_id, mut out_id) = (0u32, 0u32);
-    let _ = unsafe { mft.GetStreamIDs(1, &mut in_id, 1, &mut out_id) };
+    // Fixed-stream transforms return E_NOTIMPL here; stream 0 is then correct.
+    let (mut ins, mut outs) = ([0u32], [0u32]);
+    let (in_id, out_id) = match unsafe { mft.GetStreamIDs(&mut ins, &mut outs) } {
+        Ok(()) => (ins[0], outs[0]),
+        Err(_) => (0, 0),
+    };
 
     // Output first (H.264 Main, falling back to Constrained/Base), then input NV12.
     let profiles = [
@@ -610,10 +640,7 @@ fn make_output_type(cfg: &EncoderConfig, profile: u32) -> Result<IMFMediaType, E
             t.SetUINT64(&MF_MT_FRAME_SIZE, pack2(cfg.width, cfg.height))?;
             t.SetUINT64(&MF_MT_FRAME_RATE, pack2(cfg.fps, 1))?;
             t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
-            t.SetUINT32(
-                &MF_MT_INTERLACE_MODE,
-                MFVideoInterlace_Progressive.0 as u32,
-            )?;
+            t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         }
         Ok(())
     };
@@ -630,10 +657,7 @@ fn make_input_type(cfg: &EncoderConfig) -> Result<IMFMediaType, EncodeError> {
             t.SetUINT64(&MF_MT_FRAME_SIZE, pack2(cfg.width, cfg.height))?;
             t.SetUINT64(&MF_MT_FRAME_RATE, pack2(cfg.fps, 1))?;
             t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
-            t.SetUINT32(
-                &MF_MT_INTERLACE_MODE,
-                MFVideoInterlace_Progressive.0 as u32,
-            )?;
+            t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         }
         Ok(())
     };
@@ -665,22 +689,56 @@ fn variant_bool(b: bool) -> VARIANT {
 fn apply_codec_settings(api: &ICodecAPI, cfg: &EncoderConfig) {
     let bps = cfg.bitrate_kbps as u64 * 1000;
     let vbv_bits = (bps / cfg.fps as u64) * 3 / 2;
-    let settings: [(&str, GUID, VARIANT); 8] = [
-        ("CODECAPI_AVLowLatencyMode", CODECAPI_AVLowLatencyMode, variant_bool(true)),
-        ("CODECAPI_AVEncCommonLowLatency", CODECAPI_AVEncCommonLowLatency, variant_bool(true)),
-        ("CODECAPI_AVEncCommonRealTime", CODECAPI_AVEncCommonRealTime, variant_bool(true)),
-        ("CODECAPI_AVEncMPVDefaultBPictureCount", CODECAPI_AVEncMPVDefaultBPictureCount, variant_u32(0)),
+    let flags: [(&str, GUID, bool); 4] = [
+        ("CODECAPI_AVLowLatencyMode", CODECAPI_AVLowLatencyMode, true),
+        (
+            "CODECAPI_AVEncCommonLowLatency",
+            CODECAPI_AVEncCommonLowLatency,
+            true,
+        ),
+        (
+            "CODECAPI_AVEncCommonRealTime",
+            CODECAPI_AVEncCommonRealTime,
+            true,
+        ),
+        (
+            "CODECAPI_AVEncMPVDefaultBPictureCount",
+            CODECAPI_AVEncMPVDefaultBPictureCount,
+            false,
+        ),
+    ];
+    for (name, guid, on) in flags {
+        // Some encoders want VT_UI4 for these, others VT_BOOL: try BOOL, then UI4.
+        let as_bool = unsafe { api.SetValue(&guid, &variant_bool(on)) };
+        if as_bool.is_err() && unsafe { api.SetValue(&guid, &variant_u32(on as u32)) }.is_err() {
+            let e = as_bool.err().unwrap_or_else(windows::core::Error::empty);
+            eprintln!("wb-encode: {name} not applied: {e}");
+        }
+    }
+    let values: [(&str, GUID, u32); 4] = [
         (
             "CODECAPI_AVEncCommonRateControlMode",
             CODECAPI_AVEncCommonRateControlMode,
-            variant_u32(eAVEncCommonRateControlMode_CBR.0 as u32),
+            eAVEncCommonRateControlMode_CBR.0 as u32,
         ),
-        ("CODECAPI_AVEncCommonMeanBitRate", CODECAPI_AVEncCommonMeanBitRate, variant_u32(bps as u32)),
-        ("CODECAPI_AVEncCommonBufferSize", CODECAPI_AVEncCommonBufferSize, variant_u32(vbv_bits as u32)),
-        ("CODECAPI_AVEncMPVGOPSize", CODECAPI_AVEncMPVGOPSize, variant_u32(1_000_000)),
+        (
+            "CODECAPI_AVEncCommonMeanBitRate",
+            CODECAPI_AVEncCommonMeanBitRate,
+            bps as u32,
+        ),
+        (
+            "CODECAPI_AVEncCommonBufferSize",
+            CODECAPI_AVEncCommonBufferSize,
+            vbv_bits as u32,
+        ),
+        (
+            "CODECAPI_AVEncMPVGOPSize",
+            CODECAPI_AVEncMPVGOPSize,
+            1_000_000,
+        ),
     ];
-    for (name, guid, var) in settings.iter() {
-        if let Err(e) = unsafe { api.SetValue(guid, var) } {
+    for (name, guid, v) in values {
+        if let Err(e) = unsafe { api.SetValue(&guid, &variant_u32(v)) } {
             eprintln!("wb-encode: {name} not applied: {e}");
         }
     }
@@ -698,12 +756,20 @@ fn make_sample(
     let buf = win("MFCreateDXGISurfaceBuffer", unsafe {
         MFCreateDXGISurfaceBuffer(&<ID3D11Texture2D as Interface>::IID, &unk, 0, false)
     })?;
-    let len = win("MFGetPlaneSize", unsafe { MFGetPlaneSize(NV12_FOURCC, w, h) })?;
-    win("IMFMediaBuffer::SetCurrentLength", unsafe { buf.SetCurrentLength(len) })?;
+    let len = win("MFGetPlaneSize", unsafe {
+        MFGetPlaneSize(NV12_FOURCC, w, h)
+    })?;
+    win("IMFMediaBuffer::SetCurrentLength", unsafe {
+        buf.SetCurrentLength(len)
+    })?;
     let s = win("MFCreateSample", unsafe { MFCreateSample() })?;
     win("IMFSample::AddBuffer", unsafe { s.AddBuffer(&buf) })?;
-    win("IMFSample::SetSampleTime", unsafe { s.SetSampleTime(pts_us as i64 * 10) })?;
-    win("IMFSample::SetSampleDuration", unsafe { s.SetSampleDuration(dur_100ns) })?;
+    win("IMFSample::SetSampleTime", unsafe {
+        s.SetSampleTime(pts_us as i64 * 10)
+    })?;
+    win("IMFSample::SetSampleDuration", unsafe {
+        s.SetSampleDuration(dur_100ns)
+    })?;
     Ok(s)
 }
 
@@ -740,7 +806,10 @@ impl Converter {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_NV12,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
                 CPUAccessFlags: 0,
@@ -750,9 +819,8 @@ impl Converter {
             win("CreateTexture2D(NV12 ring)", unsafe {
                 device.CreateTexture2D(&desc, None, Some(&mut tex))
             })?;
-            ring_tex.push(
-                tex.ok_or_else(|| EncodeError::Config("NV12 texture not created".into()))?,
-            );
+            ring_tex
+                .push(tex.ok_or_else(|| EncodeError::Config("NV12 texture not created".into()))?);
         }
 
         Ok(Converter {
@@ -804,11 +872,10 @@ impl Converter {
             };
             let mut v: Option<ID3D11VideoProcessorOutputView> = None;
             win("CreateVideoProcessorOutputView", unsafe {
-                self.vdev.CreateVideoProcessorOutputView(tex, &en, &vdesc, Some(&mut v))
+                self.vdev
+                    .CreateVideoProcessorOutputView(tex, &en, &vdesc, Some(&mut v))
             })?;
-            views.push(
-                v.ok_or_else(|| EncodeError::Config("output view not created".into()))?,
-            );
+            views.push(v.ok_or_else(|| EncodeError::Config("output view not created".into()))?);
         }
 
         // Input: full-range RGB. Output: BT.709, limited range (NV12 for the encoder).
@@ -818,14 +885,28 @@ impl Converter {
         let out_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
             _bitfield: (1 << 2) | (2 << 4), // YCbCr_Matrix = BT.709, Nominal_Range = 16-235
         };
-        let src = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-        let dst = RECT { left: 0, top: 0, right: self.out_w as i32, bottom: self.out_h as i32 };
+        let src = RECT {
+            left: 0,
+            top: 0,
+            right: w as i32,
+            bottom: h as i32,
+        };
+        let dst = RECT {
+            left: 0,
+            top: 0,
+            right: self.out_w as i32,
+            bottom: self.out_h as i32,
+        };
         unsafe {
-            self.vctx.VideoProcessorSetStreamColorSpace(&proc, 0, &in_cs);
+            self.vctx
+                .VideoProcessorSetStreamColorSpace(&proc, 0, &in_cs);
             self.vctx.VideoProcessorSetOutputColorSpace(&proc, &out_cs);
-            self.vctx.VideoProcessorSetStreamSourceRect(&proc, 0, TRUE, Some(&src));
-            self.vctx.VideoProcessorSetStreamDestRect(&proc, 0, TRUE, Some(&dst));
-            self.vctx.VideoProcessorSetOutputTargetRect(&proc, TRUE, Some(&dst));
+            self.vctx
+                .VideoProcessorSetStreamSourceRect(&proc, 0, true, Some(&src));
+            self.vctx
+                .VideoProcessorSetStreamDestRect(&proc, 0, true, Some(&dst));
+            self.vctx
+                .VideoProcessorSetOutputTargetRect(&proc, true, Some(&dst));
         }
 
         self.enumerator = Some(en);
@@ -836,7 +917,10 @@ impl Converter {
         Ok(())
     }
 
-    fn input_view(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11VideoProcessorInputView, EncodeError> {
+    fn input_view(
+        &mut self,
+        src: &ID3D11Texture2D,
+    ) -> Result<ID3D11VideoProcessorInputView, EncodeError> {
         let raw = src.as_raw();
         if let Some((_, v)) = self.in_views.iter().find(|(t, _)| t.as_raw() == raw) {
             return Ok(v.clone());
@@ -849,12 +933,16 @@ impl Converter {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
             Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                Texture2D: D3D11_TEX2D_VPIV {
+                    MipSlice: 0,
+                    ArraySlice: 0,
+                },
             },
         };
         let mut v: Option<ID3D11VideoProcessorInputView> = None;
         win("CreateVideoProcessorInputView", unsafe {
-            self.vdev.CreateVideoProcessorInputView(src, en, &desc, Some(&mut v))
+            self.vdev
+                .CreateVideoProcessorInputView(src, en, &desc, Some(&mut v))
         })?;
         let v = v.ok_or_else(|| EncodeError::Config("input view not created".into()))?;
         if self.in_views.len() >= MAX_INPUT_VIEWS {
