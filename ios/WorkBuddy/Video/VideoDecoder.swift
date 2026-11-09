@@ -74,7 +74,6 @@ final class VideoDecoder {
     private var _lastDecodeUs: UInt32 = 0
     private var inFlight: Int = 0
     private var pending: [UInt64: PendingFrame] = [:]
-    private var keyframeRequested = false
 
     // Queue-confined.
     private var sps: Data?
@@ -83,6 +82,12 @@ final class VideoDecoder {
     private var session: VTDecompressionSession?
     private var awaitingKeyframe = true   // silently ignore non-key frames
     private var dropping = false          // overload drop mode, counted, until next keyframe
+    private var lastKeyframeRequestNanos: UInt64? = nil   // rate limit for IDR requests (queue-confined)
+
+    // Overload / recovery tuning.
+    private let overloadInFlightLimit = 4                    // hardware decoders legitimately hold 3-4
+    private let overloadWaitNanos: UInt64 = 60_000_000       // oldest in-flight frame must wait this long
+    private let keyframeRequestIntervalNanos: UInt64 = 200_000_000
 
     // MARK: - Lock helper
 
@@ -137,17 +142,19 @@ final class VideoDecoder {
             dropping = false
         } else {
             if awaitingKeyframe {
+                // Keep asking for an IDR (rate-limited) until one arrives.
+                requestKeyframeRateLimited()
                 return
             }
             if dropping {
                 countDrop()
+                requestKeyframeRateLimited()
                 return
             }
-            let busy = locked { inFlight }
-            if busy > 2 {
+            if isOverloaded(nowNanos: DispatchTime.now().uptimeNanoseconds) {
                 dropping = true
                 countDrop()
-                requestKeyframeOnce()
+                requestKeyframeRateLimited()
                 return
             }
         }
@@ -163,7 +170,8 @@ final class VideoDecoder {
         pending[ptsUs] = PendingFrame(submitNanos: submitNanos, keyframe: keyframe)
         lock.unlock()
 
-        let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression, ._1xRealTimePlayback]
+        // No _1xRealTimePlayback: it lets VT drop frames silently. Drops are handled in handleOutput.
+        let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
         let status = VTDecompressionSessionDecodeFrame(
             activeSession,
             sampleBuffer: sample,
@@ -277,11 +285,11 @@ final class VideoDecoder {
         formatDesc = nil
         awaitingKeyframe = true
         dropping = false
+        lastKeyframeRequestNanos = nil
 
         lock.lock()
         inFlight = 0
         pending.removeAll()
-        keyframeRequested = false
         lock.unlock()
     }
 
@@ -381,16 +389,25 @@ final class VideoDecoder {
         lock.unlock()
     }
 
-    /// Overload path: asks for a keyframe once until one is decoded.
-    private func requestKeyframeOnce() {
-        lock.lock()
-        let shouldRequest = !keyframeRequested
-        keyframeRequested = true
-        let cb = _onNeedKeyframe
-        lock.unlock()
-        if shouldRequest {
-            cb?()
+    /// True when more than `overloadInFlightLimit` frames are in flight AND the oldest one has
+    /// been waiting longer than `overloadWaitNanos`. Queue depth alone is not overload.
+    private func isOverloaded(nowNanos: UInt64) -> Bool {
+        return locked { () -> Bool in
+            guard inFlight > overloadInFlightLimit else { return false }
+            guard let oldest = pending.values.map({ $0.submitNanos }).min() else { return false }
+            return nowNanos > oldest && nowNanos - oldest > overloadWaitNanos
         }
+    }
+
+    /// Requests an IDR, at most once per `keyframeRequestIntervalNanos`. Queue-confined.
+    /// Re-evaluated on every incoming non-key frame while recovering, so a lost request is retried.
+    private func requestKeyframeRateLimited() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last = lastKeyframeRequestNanos, now < last + keyframeRequestIntervalNanos {
+            return
+        }
+        lastKeyframeRequestNanos = now
+        emitNeedKeyframe()
     }
 
     /// Error path: always reports (Session rate-limits the actual KEYFRAME_REQUEST).
@@ -410,14 +427,14 @@ final class VideoDecoder {
     // MARK: - VT output callback
 
     /// Plain C callback: captures nothing; the decoder comes back through the refCon.
-    private static let outputCallback: VTDecompressionOutputCallback = { refCon, _, status, _, imageBuffer, pts, _ in
+    private static let outputCallback: VTDecompressionOutputCallback = { refCon, _, status, infoFlags, imageBuffer, pts, _ in
         guard let refCon = refCon else { return }
         let decoder = Unmanaged<VideoDecoder>.fromOpaque(refCon).takeUnretainedValue()
-        decoder.handleOutput(status: status, imageBuffer: imageBuffer, pts: pts)
+        decoder.handleOutput(status: status, infoFlags: infoFlags, imageBuffer: imageBuffer, pts: pts)
     }
 
     /// Runs on a VT thread.
-    fileprivate func handleOutput(status: OSStatus, imageBuffer: CVImageBuffer?, pts: CMTime) {
+    fileprivate func handleOutput(status: OSStatus, infoFlags: VTDecodeInfoFlags, imageBuffer: CVImageBuffer?, pts: CMTime) {
         let key = UInt64(bitPattern: pts.value)
         let nowNanos = DispatchTime.now().uptimeNanoseconds
 
@@ -426,9 +443,20 @@ final class VideoDecoder {
         let info = pending.removeValue(forKey: key)
         lock.unlock()
 
-        guard status == noErr, let image = imageBuffer else {
+        // Hard failure: VT returned an error status. Resync on the next keyframe.
+        guard status == noErr else {
             queue.async { [weak self] in
                 self?.handleDecodeFailure()
+            }
+            return
+        }
+
+        // VT skipped this frame (no image, or frameDropped). Not a hard failure: count it,
+        // request a keyframe through the rate-limited path, and keep decoding later frames.
+        guard let image = imageBuffer, !infoFlags.contains(.frameDropped) else {
+            countDrop()
+            queue.async { [weak self] in
+                self?.requestKeyframeRateLimited()
             }
             return
         }
@@ -442,9 +470,6 @@ final class VideoDecoder {
         lock.lock()
         _framesDecoded &+= 1
         _lastDecodeUs = decodeUs
-        if info?.keyframe == true {
-            keyframeRequested = false
-        }
         let callback = _onFrame
         lock.unlock()
 
