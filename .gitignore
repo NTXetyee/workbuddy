@@ -1,0 +1,8 @@
+﻿host/target*/
+target/
+ios/WorkBuddy.xcodeproj/
+ios/build/
+ios/WBProto/.build/
+dist/
+*.h264
+.DS_Store
