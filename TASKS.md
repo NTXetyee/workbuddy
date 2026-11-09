@@ -27,10 +27,15 @@ Tags: INDEPENDENT or BLOCKED_BY. Status: TODO / RUNNING / DONE / FAILED(n).
 | ID | Task | Tag | Status |
 |---|---|---|---|
 | T12 | Repo create/push (needs gh login) | HALT: user does `gh auth login` | DONE (NTXetyee/workbuddy public) |
-| T13 | Install virtual display driver (admin) | HALT: user runs scripts/install-vdd.ps1 | TODO |
-| T14 | Sideload IPA with AltStore, launch, run wb-host | HALT: user | TODO |
+| T13 | Install virtual display driver (admin) | HALT: user runs scripts/install-vdd.ps1 | DONE (2 nodes cleaned, 2266x1488 set via targeted ChangeDisplaySettingsEx) |
+| T14 | Sideload IPA with AltStore, launch, run wb-host | HALT: user | DONE (M1 verified live on iPad mini 6, 2026-11-09) |
 
 ## Post-M1 (not scheduled)
 Tray icon, orientation follow, touch -> InjectTouchInput, direct NVENC + intra-refresh, DPI/resolution control from host, hotplug of virtual monitor.
 
+
+
+## Milestone 1 reached (2026-11-09)
+Live stream over USB works. Measured: ~33 fps (target 60), enc_ms 12-14 under real content (3-5 ms in synthetic dump), ipad_drop 4-5 of ~600, 0 host drops.
+Next candidates: (a) find why fps is ~33 and encode ms is 3x the synthetic number (capture pacing / VideoProcessor / MFT warm-up / GPU clocks); (b) glass-to-glass measurement; (c) touch input; (d) rotation; (e) tray; (f) direct NVENC.
 
