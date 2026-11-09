@@ -47,3 +47,13 @@ Next candidates: (a) find why fps is ~33 and encode ms is 3x the synthetic numbe
 - Open: static-screen repeats still cost 6-12 Mbps at ~32 fps (CBR); consider lower repeat rate.
 - Open: real glass-to-glass measurement; est. now ~40-45 ms (cap phase ~8, enc ~8, USB ~3, iPad decode ~11, present ~8).
 
+
+## Tuning round 2 (2026-11-09)
+- Direct NVENC backend (wb-encode, MFT kept as fallback): 1.7-2.6 ms/frame at 2266x1488 under sustained motion (was 7.8 ms MFT).
+- Capture decoupled onto its own thread (polling next_frame(0)+1 ms sleep; a blocking AcquireNextFrame stalled the encoder ~100x, likely the D3D11 multithread lock), newest-frame-wins mailbox, idle repeat 5 fps (--idle-fps), ~1 Mbps idle.
+- iOS decoder: 4 in flight / 60 ms rule, 200 ms keyframe re-request, soft handling of dropped output. Verified live: idle->burst 5->60 fps, 0 iPad drops.
+- Host: forced-IDR rate limit 100 ms, refusal back-off, 3 s stall watchdog (fixes 560 fps IDR storm when iPad stops reading).
+- GPU clocks: no lock needed; GPU self-ramps in ~2 s (P4/P0). nvidia-smi -lgc experiment reverted with -rgc.
+- Remaining: real glass-to-glass measurement (timestamp in frames + on-screen counter, needs iPad rebuild), est. 30-40 ms; 20 ms stretch needs a smaller chain (lower res, intra-refresh/slices, decoder tuning).
+- Not started (by decision): touch/Pencil, rotation, tray icon.
+
