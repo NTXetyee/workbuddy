@@ -1,4 +1,4 @@
-# WorkBuddy
+﻿# WorkBuddy
 
 iPad mini 6 as a USB second screen for a Windows 11 PC (RTX 5060 Laptop + Radeon 780M, MUX). Read `SPEC.md` for the architecture and wire protocol; `TASKS.md` for status.
 
@@ -59,3 +59,11 @@ capture 1-2 ms (+ frame-phase wait), convert+encode 3-5 ms, USB 2-3 ms, decode 2
 - Host crates have no cross-crate behavior beyond the SPEC contracts.
 - iOS: `SWIFT_VERSION 5.0`, no third-party packages, no storyboard, no hand-edited .xcodeproj (generated, gitignored).
 - Commits are made by the architect only, not by workers.
+
+## Daily use (as built)
+- Desktop shortcut **WorkBuddy** (made by scripts/make-shortcut.ps1) -> conhost.exe -> scripts/start-wb-host.ps1 -> finds the 2266x1488 output, runs host\target-all\release\wb-host.exe in a classic console. Minimize = hide to tray (tooltip shows status); tray menu: Show window / Quit. Closing the window stops the host. Flags: --verbose (per-second diagnostics), --no-tray, --idle-fps N, --output N.
+- Rebuild: stop the host first (it locks the exe), then cargo build --release -p wb-host --target-dir target-all from host/.
+- Encoder: direct NVENC when available (1.7-2.6 ms), MFT fallback; WB_ENCODER=mft|nvenc forces one. No GPU clock lock needed.
+- iPad: re-sideload from the CI artifact (WorkBuddy-ipa) on each iOS change; AltStore refresh every 7 days.
+- Not built: touch/Pencil, rotation, latency counter (est. 30-40 ms glass-to-glass, unmeasured).
+
