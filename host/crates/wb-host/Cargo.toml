@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-
+wb-proto = { path = "../wb-proto" }
+wb-usbmux = { path = "../wb-usbmux" }
+wb-capture = { path = "../wb-capture" }
+wb-encode = { path = "../wb-encode" }

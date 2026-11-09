@@ -198,6 +198,12 @@ dependencies = [
 [[package]]
 name = "wb-host"
 version = "0.1.0"
+dependencies = [
+ "wb-capture",
+ "wb-encode",
+ "wb-proto",
+ "wb-usbmux",
+]
 
 [[package]]
 name = "wb-proto"
