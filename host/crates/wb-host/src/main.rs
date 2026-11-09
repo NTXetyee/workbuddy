@@ -120,6 +120,7 @@ fn dump(args: &Args, path: &Path) -> i32 {
             return 1;
         }
     };
+    eprintln!("{}", src.describe());
     let file = match File::create(path) {
         Ok(f) => f,
         Err(e) => {
@@ -203,6 +204,7 @@ fn serve(args: &Args) -> i32 {
                 continue;
             }
         };
+        eprintln!("{}", src.describe());
         let (cfg, size) = (src.config(), src.size());
         let end = net::run_session(
             stream,

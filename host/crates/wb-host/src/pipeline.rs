@@ -29,6 +29,17 @@ const MAX_WAIT: Duration = Duration::from_millis(100);
 /// Highest accepted `idle_fps`.
 pub const MAX_IDLE_FPS: u32 = 60;
 const STATS_PERIOD: Duration = Duration::from_secs(1);
+/// Minimum time between two forced (keyframe) encodes. A keyframe request inside this window
+/// waits for it to pass; the request stays set, so it is not lost.
+pub const FORCED_IDR_MIN_INTERVAL: Duration = Duration::from_millis(100);
+/// Consecutive refused frames before the producer starts to back off between attempts.
+const REFUSED_BACKOFF_AFTER: u32 = 5;
+/// Sleep between attempts once the sink has refused [`REFUSED_BACKOFF_AFTER`] frames in a row.
+const REFUSED_BACKOFF: Duration = Duration::from_millis(20);
+/// The sink must accept a frame within this long of its first refusal, or the session ends.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(3);
+/// Error text when the stall watchdog ends a session (`STALL_TIMEOUT` in seconds).
+const STALL_ERROR: &str = "iPad stopped reading for 3 s";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -174,6 +185,8 @@ pub struct CaptureEncoder {
     /// When `last` arrived from capture.
     last_new_at: Instant,
     last_encode: Option<Instant>,
+    /// When the last forced (keyframe-requested) encode started.
+    last_forced: Option<Instant>,
     /// Time between idle repeats of an unchanged screen (1 / idle_fps).
     idle_interval: Duration,
     repeat_after: Duration,
@@ -229,6 +242,7 @@ impl CaptureEncoder {
             last: None,
             last_new_at: now,
             last_encode: None,
+            last_forced: None,
             idle_interval: Duration::from_secs_f64(1.0 / f64::from(opts.idle_fps)),
             repeat_after: opts.repeat_after,
             epoch: now,
@@ -238,6 +252,19 @@ impl CaptureEncoder {
     /// Encoded stream size (what the iPad will decode).
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// The one-line `[encode]` summary printed at startup: backend, adapter, size, fps, bitrate.
+    pub fn describe(&self) -> String {
+        format!(
+            "[encode] backend={} adapter={} {}x{} @{} fps {} kbps",
+            self.enc.backend().name(),
+            self.enc.adapter_name(),
+            self.size.0,
+            self.size.1,
+            self.fps,
+            self.bitrate_kbps
+        )
     }
 
     /// The CONFIG message describing this stream.
@@ -264,16 +291,22 @@ impl CaptureEncoder {
     }
 
     /// How long to wait for a new image: until the next idle repeat is due, at most `MAX_WAIT`.
-    fn wait_budget(&self, now: Instant) -> Duration {
-        if self.last.is_none() {
-            return MAX_WAIT;
+    /// A pending keyframe request that is held back by the forced-encode gate also caps the wait
+    /// at the moment the gate opens.
+    fn wait_budget(&self, now: Instant, force_requested: bool) -> Duration {
+        let mut budget = MAX_WAIT;
+        if self.last.is_some() {
+            let stale_at = self.last_new_at + self.repeat_after;
+            let due = match self.last_encode {
+                Some(t) => stale_at.max(t + self.idle_interval),
+                None => stale_at,
+            };
+            budget = due.saturating_duration_since(now).min(MAX_WAIT);
         }
-        let stale_at = self.last_new_at + self.repeat_after;
-        let due = match self.last_encode {
-            Some(t) => stale_at.max(t + self.idle_interval),
-            None => stale_at,
-        };
-        due.saturating_duration_since(now).min(MAX_WAIT)
+        if let (true, Some(t)) = (force_requested, self.last_forced) {
+            budget = budget.min((t + FORCED_IDR_MIN_INTERVAL).saturating_duration_since(now));
+        }
+        budget
     }
 }
 
@@ -287,38 +320,68 @@ impl Drop for CaptureEncoder {
     }
 }
 
+/// Whether a forced (keyframe) encode may start, given the time since the last forced encode.
+/// `None` means there has been no forced encode yet.
+pub fn forced_gate_open(since_last_forced: Option<Duration>) -> bool {
+    since_last_forced.is_none_or(|d| d >= FORCED_IDR_MIN_INTERVAL)
+}
+
 /// Pacing decision for one loop iteration.
 ///
-/// A new image (`pending`) and a keyframe request (`force`) are always encoded, with no interval
-/// gate. Desktop Duplication already delivers at most one image per monitor refresh. A static
-/// screen is repeated only when it is `stale` and at least `interval` has passed since the previous
-/// encode finished (`since_last_encode` is `None` before the first encode). `interval` is
-/// `1 / idle_fps`.
+/// A new image (`pending`) is always encoded, with no interval gate. Desktop Duplication already
+/// delivers at most one image per monitor refresh. A keyframe request (`force`) is encoded only
+/// when [`forced_gate_open`] allows it, that is at most one forced encode per
+/// [`FORCED_IDR_MIN_INTERVAL`]. A request inside that window is not encoded here. The caller keeps
+/// it set, so it is answered once the window passes. A static screen is repeated only when it is
+/// `stale` and at least `interval` has passed since the previous encode finished
+/// (`since_last_encode` is `None` before the first encode). `interval` is `1 / idle_fps`.
+/// `since_last_forced` is the time since the previous forced encode, `None` before the first one.
 pub fn should_encode(
     pending: bool,
     stale: bool,
     force: bool,
     since_last_encode: Option<Duration>,
     interval: Duration,
+    since_last_forced: Option<Duration>,
 ) -> bool {
-    if pending || force {
+    if pending || (force && forced_gate_open(since_last_forced)) {
         return true;
     }
     let due = since_last_encode.is_none_or(|d| d >= interval);
     stale && due
 }
 
+/// Watchdog decision: true when the refusal streak that began at `refused_since` has lasted at
+/// least `limit`. `None` means the sink has not refused since it last accepted a frame.
+pub fn stalled(refused_since: Option<Instant>, now: Instant, limit: Duration) -> bool {
+    refused_since.is_some_and(|t| now.saturating_duration_since(t) >= limit)
+}
+
+/// Sleep before the next attempt after `consecutive_refused` refused frames in a row.
+pub fn refusal_backoff(consecutive_refused: u32) -> Duration {
+    if consecutive_refused >= REFUSED_BACKOFF_AFTER {
+        REFUSED_BACKOFF
+    } else {
+        Duration::ZERO
+    }
+}
+
 impl FrameSource for CaptureEncoder {
     fn next_frame(&mut self, force_idr: &AtomicBool) -> Result<Option<Produced>, String> {
         self.check_capture()?;
         let mut fresh = self.shared.frames.take_latest();
-        // Nothing new and no keyframe request: sleep until a new image arrives or an idle repeat
-        // is due. A keyframe request skips the wait and is answered at once.
-        if fresh.is_none() && !force_idr.load(SeqCst) {
+        // Nothing new and no keyframe request that may go now: sleep until a new image arrives,
+        // an idle repeat is due, or the forced-encode gate opens. A keyframe request that may go
+        // now skips the wait and is answered at once.
+        let now0 = Instant::now();
+        let force_requested = force_idr.load(SeqCst);
+        let forced_now =
+            force_requested && forced_gate_open(self.last_forced.map(|t| now0.duration_since(t)));
+        if fresh.is_none() && !forced_now {
             fresh = self
                 .shared
                 .frames
-                .wait_take(self.wait_budget(Instant::now()));
+                .wait_take(self.wait_budget(now0, force_requested));
         }
         let new = fresh.is_some();
         if let Some(frame) = fresh {
@@ -328,21 +391,30 @@ impl FrameSource for CaptureEncoder {
         let Some(last) = self.last.as_ref() else {
             return Ok(None);
         };
+        let force_requested = force_idr.load(SeqCst);
         let now = Instant::now();
         let stale = now.duration_since(self.last_new_at) >= self.repeat_after;
         let since_last_encode = self.last_encode.map(|t| now.duration_since(t));
+        let since_last_forced = self.last_forced.map(|t| now.duration_since(t));
         if !should_encode(
             new,
             stale,
-            force_idr.load(SeqCst),
+            force_requested,
             since_last_encode,
             self.idle_interval,
+            since_last_forced,
         ) {
             return Ok(None);
         }
-        let force = force_idr.swap(false, SeqCst);
+        // Only a request inside the gate is answered as a keyframe; otherwise the request stays
+        // set for a later encode.
+        let force =
+            forced_gate_open(since_last_forced) && force_requested && force_idr.swap(false, SeqCst);
         let pts_us = self.epoch.elapsed().as_micros() as u64;
         let started = Instant::now();
+        if force {
+            self.last_forced = Some(started);
+        }
         let out = self
             .enc
             .encode(&last.texture, pts_us, force)
@@ -466,7 +538,9 @@ impl Window {
 }
 
 /// Runs source -> sink until `should_stop` returns true. A refused frame sets `force_idr` so
-/// the next encode is a keyframe. `extra` adds text to the once-per-second stats line.
+/// the next encode is a keyframe. After [`REFUSED_BACKOFF_AFTER`] refusals in a row the loop
+/// sleeps between attempts. If the sink refuses for [`STALL_TIMEOUT`] without accepting a frame,
+/// the loop returns an error. `extra` adds text to the once-per-second stats line.
 pub fn run_loop<S: FrameSource, K: FrameSink>(
     src: &mut S,
     sink: &mut K,
@@ -474,8 +548,23 @@ pub fn run_loop<S: FrameSource, K: FrameSink>(
     should_stop: &mut dyn FnMut() -> bool,
     extra: &dyn Fn() -> String,
 ) -> Result<LoopSummary, String> {
+    run_loop_with_stall(src, sink, force_idr, should_stop, extra, STALL_TIMEOUT)
+}
+
+/// [`run_loop`] with the stall limit passed in, so tests can use a short one.
+fn run_loop_with_stall<S: FrameSource, K: FrameSink>(
+    src: &mut S,
+    sink: &mut K,
+    force_idr: &AtomicBool,
+    should_stop: &mut dyn FnMut() -> bool,
+    extra: &dyn Fn() -> String,
+    stall_limit: Duration,
+) -> Result<LoopSummary, String> {
     let mut sum = LoopSummary::default();
     let mut win = Window::new();
+    // Refusals since the last accepted frame, and when that streak began.
+    let mut refused_run: u32 = 0;
+    let mut refused_since: Option<Instant> = None;
     while !should_stop() {
         if let Some(p) = src.next_frame(force_idr)? {
             let bytes = p.frame.data.len() as u64;
@@ -488,9 +577,20 @@ pub fn run_loop<S: FrameSource, K: FrameSink>(
             win.encode += p.encode_time;
             if sink.offer(p.frame)? {
                 sum.sent += 1;
+                refused_run = 0;
+                refused_since = None;
             } else {
                 sum.dropped += 1;
                 force_idr.store(true, SeqCst);
+                refused_run = refused_run.saturating_add(1);
+                let since = *refused_since.get_or_insert_with(Instant::now);
+                if stalled(Some(since), Instant::now(), stall_limit) {
+                    return Err(STALL_ERROR.to_string());
+                }
+                let backoff = refusal_backoff(refused_run);
+                if !backoff.is_zero() {
+                    thread::sleep(backoff);
+                }
             }
         }
         if win.start.elapsed() >= STATS_PERIOD {
@@ -628,27 +728,45 @@ mod tests {
             false,
             false,
             Some(Duration::ZERO),
-            INTERVAL
+            INTERVAL,
+            None
         ));
-        assert!(should_encode(true, true, false, None, INTERVAL));
+        assert!(should_encode(true, true, false, None, INTERVAL, None));
+        // A new frame is not held back by the forced-encode gate either.
+        assert!(should_encode(
+            true,
+            false,
+            true,
+            Some(Duration::ZERO),
+            INTERVAL,
+            Some(Duration::ZERO)
+        ));
     }
 
     #[test]
     fn no_new_frame_and_not_stale_does_not_encode() {
-        assert!(!should_encode(false, false, false, None, INTERVAL));
+        assert!(!should_encode(false, false, false, None, INTERVAL, None));
         assert!(!should_encode(
             false,
             false,
             false,
             Some(INTERVAL * 10),
-            INTERVAL
+            INTERVAL,
+            None
         ));
     }
 
     #[test]
     fn stale_and_due_repeats() {
-        assert!(should_encode(false, true, false, Some(INTERVAL), INTERVAL));
-        assert!(should_encode(false, true, false, None, INTERVAL));
+        assert!(should_encode(
+            false,
+            true,
+            false,
+            Some(INTERVAL),
+            INTERVAL,
+            None
+        ));
+        assert!(should_encode(false, true, false, None, INTERVAL, None));
     }
 
     #[test]
@@ -658,7 +776,8 @@ mod tests {
             true,
             false,
             Some(INTERVAL - Duration::from_micros(1)),
-            INTERVAL
+            INTERVAL,
+            None
         ));
     }
 
@@ -669,9 +788,140 @@ mod tests {
             false,
             true,
             Some(Duration::ZERO),
-            INTERVAL
+            INTERVAL,
+            None
         ));
-        assert!(should_encode(false, false, true, None, INTERVAL));
+        assert!(should_encode(false, false, true, None, INTERVAL, None));
+    }
+
+    #[test]
+    fn forced_within_window_does_not_encode() {
+        // Forced 99 ms after the last forced encode: held back, with no new frame or stale screen.
+        assert!(!should_encode(
+            false,
+            false,
+            true,
+            None,
+            INTERVAL,
+            Some(FORCED_IDR_MIN_INTERVAL - Duration::from_millis(1))
+        ));
+        assert!(!should_encode(
+            false,
+            false,
+            true,
+            Some(Duration::ZERO),
+            INTERVAL,
+            Some(Duration::ZERO)
+        ));
+    }
+
+    #[test]
+    fn forced_after_window_encodes() {
+        assert!(should_encode(
+            false,
+            false,
+            true,
+            None,
+            INTERVAL,
+            Some(FORCED_IDR_MIN_INTERVAL)
+        ));
+        assert!(should_encode(
+            false,
+            false,
+            true,
+            None,
+            INTERVAL,
+            Some(FORCED_IDR_MIN_INTERVAL * 5)
+        ));
+    }
+
+    #[test]
+    fn gated_force_still_allows_idle_repeat() {
+        // The idle repeat itself is unchanged; the caller then encodes it without the keyframe.
+        assert!(should_encode(
+            false,
+            true,
+            true,
+            Some(INTERVAL),
+            INTERVAL,
+            Some(Duration::ZERO)
+        ));
+    }
+
+    #[test]
+    fn forced_gate_boundary() {
+        assert!(!forced_gate_open(Some(Duration::from_millis(99))));
+        assert!(forced_gate_open(Some(Duration::from_millis(100))));
+        assert!(forced_gate_open(None));
+    }
+
+    #[test]
+    fn watchdog_only_fires_after_limit_of_refusals() {
+        let now = Instant::now();
+        let limit = Duration::from_secs(3);
+        assert!(!stalled(None, now, limit));
+        let recent = now - Duration::from_secs(2);
+        assert!(!stalled(Some(recent), now, limit));
+        let old = now - Duration::from_secs(3);
+        assert!(stalled(Some(old), now, limit));
+    }
+
+    #[test]
+    fn refusal_backoff_starts_after_five_refusals() {
+        assert_eq!(refusal_backoff(4), Duration::ZERO);
+        assert_eq!(refusal_backoff(5), REFUSED_BACKOFF);
+        assert_eq!(refusal_backoff(50), REFUSED_BACKOFF);
+    }
+
+    #[test]
+    fn always_refusing_sink_ends_with_stall_error() {
+        let force = AtomicBool::new(false);
+        let err = run_loop_with_stall(
+            &mut Synthetic { n: 0 },
+            &mut Refuse,
+            &force,
+            &mut || false,
+            &String::new,
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert_eq!(err, STALL_ERROR);
+        assert!(force.load(SeqCst));
+    }
+
+    /// Refuses every second frame, so the refusal streak never reaches the stall limit.
+    struct Alternating {
+        n: u64,
+    }
+
+    impl FrameSink for Alternating {
+        fn offer(&mut self, _frame: EncodedFrame) -> Result<bool, String> {
+            self.n += 1;
+            Ok(self.n.is_multiple_of(2))
+        }
+    }
+
+    #[test]
+    fn accepted_frame_resets_the_stall_watchdog() {
+        let force = AtomicBool::new(false);
+        let mut n = 0;
+        let mut stop = move || {
+            n += 1;
+            n > 10
+        };
+        // Every refusal is followed by an accept, so the streak never reaches the limit and the
+        // loop ends normally when `stop` fires after 10 iterations.
+        let sum = run_loop_with_stall(
+            &mut Synthetic { n: 0 },
+            &mut Alternating { n: 0 },
+            &force,
+            &mut stop,
+            &String::new,
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert_eq!(sum.sent, 5);
+        assert_eq!(sum.dropped, 5);
     }
 
     #[test]
