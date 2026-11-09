@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,11 +13,12 @@ use wb_host::cli::{self, Args, Mode, OutputSpec};
 use wb_host::net::{self, SessionEnd};
 use wb_host::pipeline::{self, CaptureEncoder, EncodeOpts, Extra, Tick, WriteSink};
 use wb_host::status;
+use wb_host::tray;
 use wb_proto::Hello;
 use wb_usbmux::Usbmux;
 
-/// Set by the Ctrl+C handler.
-static STOP: AtomicBool = AtomicBool::new(false);
+/// Set by the Ctrl+C handler and by the tray icon's Quit. Shared with the tray thread, hence `Arc`.
+static STOP: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
 const DEVICE_POLL_MS: u64 = 500;
 const CONNECT_RETRY: Duration = Duration::from_millis(500);
@@ -61,6 +63,7 @@ fn main() {
                 Mode::ListOutputs => list_outputs(),
                 Mode::Dump(path) => dump(&args, path),
                 Mode::Serve => serve(&args),
+                Mode::TraySelftest(secs) => tray::selftest(*secs),
                 Mode::Help => 0,
             };
             status::clear();
@@ -194,11 +197,23 @@ fn dump(args: &Args, path: &Path) -> i32 {
 /// Default mode: serve the iPad until Ctrl+C. Waits for a device, connects, streams, and
 /// starts over when the session ends.
 fn serve(args: &Args) -> i32 {
+    // The tray icon lives for the whole serve run. Dropping it at the end removes the icon.
+    let tray_status = Arc::new(Mutex::new(String::new()));
+    let _tray = if args.no_tray {
+        None
+    } else {
+        let tray = tray::start(Arc::clone(&STOP), Arc::clone(&tray_status));
+        if tray.is_none() {
+            status::debug("[tray] no classic console window; no tray icon");
+        }
+        tray
+    };
     let mux = Usbmux::new();
     let mut waiting = false;
     while !STOP.load(SeqCst) {
         if !waiting {
             status::event("Waiting for iPad on USB...");
+            status::set_tray(&tray_status, "waiting for iPad");
             waiting = true;
         }
         let device = match mux.wait_for_device(DEVICE_POLL_MS, &STOP) {
@@ -232,15 +247,19 @@ fn serve(args: &Args) -> i32 {
         let (cfg, size) = (src.config(), src.size());
         let verbose = status::verbose();
         let mut report = |tick: &Tick| {
+            let line = status::streaming_line(tick, size);
+            status::set_tray(&tray_status, &line);
             if verbose {
                 status::report_tick(tick);
             } else {
-                status::status(&status::streaming_line(tick, size));
+                status::status(&line);
             }
         };
+        let connected_status = Arc::clone(&tray_status);
         let end = net::run_session(
             stream,
             move |hello| {
+                status::set_tray(&connected_status, "iPad connected");
                 if !verbose {
                     status::event(&format!(
                         "iPad connected ({}, {}x{})",

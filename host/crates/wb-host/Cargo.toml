@@ -8,3 +8,10 @@ wb-proto = { path = "../wb-proto" }
 wb-usbmux = { path = "../wb-usbmux" }
 wb-capture = { path = "../wb-capture" }
 wb-encode = { path = "../wb-encode" }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -16,6 +16,7 @@ usage: wb-host [options]
   --dump <file.h264>         write the Annex-B stream to a file instead of serving the iPad
   --seconds <n>              length of a --dump run (default 10)
   --width <w> --height <h>   encode size (default: capture size rounded down to even)
+  --no-tray                  keep the console window; do not minimize to a tray icon
   -v, --verbose              print every diagnostic line and the per-second stats
   -h, --help                 show this help";
 
@@ -36,6 +37,8 @@ pub enum Mode {
     Dump(PathBuf),
     ListOutputs,
     Help,
+    /// Hidden self-test of the tray icon (`--tray-selftest <seconds>`); not in the usage text.
+    TraySelftest(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +55,8 @@ pub struct Args {
     pub size: Option<(u32, u32)>,
     /// Print every diagnostic line and the per-second stats (`--verbose` / `-v`).
     pub verbose: bool,
+    /// Do not minimize to a tray icon (`--no-tray`).
+    pub no_tray: bool,
 }
 
 /// Parses the arguments after the program name. Accepts `--flag value` and `--flag=value`.
@@ -70,9 +75,11 @@ where
         seconds: 10,
         size: None,
         verbose: false,
+        no_tray: false,
     };
     let mut help = false;
     let mut list = false;
+    let mut selftest: Option<u64> = None;
     let mut dump: Option<PathBuf> = None;
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
@@ -124,6 +131,13 @@ where
                 no_value(flag, inline)?;
                 out.verbose = true;
             }
+            "--no-tray" => {
+                no_value(flag, inline)?;
+                out.no_tray = true;
+            }
+            "--tray-selftest" => {
+                selftest = Some(number(flag, &take_value(flag, inline, &mut rest)?, 5, 600)?);
+            }
             "--help" | "-h" => {
                 no_value(flag, inline)?;
                 help = true;
@@ -136,6 +150,8 @@ where
         Mode::Help
     } else if list {
         Mode::ListOutputs
+    } else if let Some(secs) = selftest {
+        Mode::TraySelftest(secs)
     } else if let Some(path) = dump {
         Mode::Dump(path)
     } else {
@@ -329,5 +345,40 @@ mod tests {
     fn usage_documents_verbose() {
         assert!(USAGE.contains("--verbose"));
         assert!(USAGE.contains("-v, --verbose"));
+    }
+
+    #[test]
+    fn no_tray_is_off_by_default_and_takes_no_value() {
+        assert!(!p(&[]).unwrap().no_tray);
+        assert!(p(&["--no-tray"]).unwrap().no_tray);
+        assert!(p(&["--no-tray", "--output", "1"]).unwrap().no_tray);
+        assert!(p(&["--no-tray=yes"]).is_err());
+        assert_eq!(p(&["--no-tray"]).unwrap().mode, Mode::Serve);
+    }
+
+    #[test]
+    fn usage_documents_no_tray() {
+        assert!(USAGE.contains("--no-tray"));
+    }
+
+    #[test]
+    fn tray_selftest_is_a_hidden_mode() {
+        assert_eq!(
+            p(&["--tray-selftest", "12"]).unwrap().mode,
+            Mode::TraySelftest(12)
+        );
+        assert_eq!(
+            p(&["--tray-selftest=30"]).unwrap().mode,
+            Mode::TraySelftest(30)
+        );
+        assert!(!USAGE.contains("tray-selftest"));
+    }
+
+    #[test]
+    fn tray_selftest_range_and_value_are_checked() {
+        assert!(p(&["--tray-selftest"]).is_err());
+        assert!(p(&["--tray-selftest", "4"]).is_err());
+        assert!(p(&["--tray-selftest", "601"]).is_err());
+        assert!(p(&["--tray-selftest", "soon"]).is_err());
     }
 }

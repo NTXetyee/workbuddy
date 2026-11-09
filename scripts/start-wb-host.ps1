@@ -12,6 +12,11 @@
        If that size is not found, falls back to the highest-IDX output that is not the first row
        (the virtual monitor is usually not index 0) and warns about it.
     4. Starts "wb-host.exe --output <idx>" in this same console window and waits for it to end.
+    5. Minimizing this window hides it and leaves a WorkBuddy icon in the notification tray (the
+       system tray next to the clock). Click the icon to show the window again; its menu has
+       "Show window" and "Quit WorkBuddy host". Closing the window or pressing Ctrl+C stops the host.
+       The tray needs this classic console window: the Desktop shortcut starts it through
+       conhost.exe for that reason (see make-shortcut.ps1).
 
 .PARAMETER DryRun
   Only prints the output index that would be used and exits without starting the host.

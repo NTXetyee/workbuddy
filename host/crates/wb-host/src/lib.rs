@@ -5,3 +5,4 @@ pub mod cli;
 pub mod net;
 pub mod pipeline;
 pub mod status;
+pub mod tray;

@@ -113,6 +113,14 @@ pub fn clear() {
     console().clear();
 }
 
+/// Publishes the current one-line status for the tray icon tooltip, e.g. "iPad connected".
+pub fn set_tray(shared: &Mutex<String>, text: &str) {
+    let mut slot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = format!("WorkBuddy: {text}");
+}
+
 /// Turns on ANSI escape handling for the stderr console. Returns false when that is not possible,
 /// in which case the status line is blanked with spaces instead.
 fn enable_virtual_terminal() -> bool {

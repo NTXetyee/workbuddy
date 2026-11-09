@@ -3,8 +3,12 @@
   Creates (or overwrites) WorkBuddy.lnk on the Desktop that starts the WorkBuddy iPad display host.
 
 .DESCRIPTION
-  The shortcut runs scripts\start-wb-host.ps1 through Windows PowerShell with a normal window,
-  using the repository root as the working directory.
+  The shortcut runs scripts\start-wb-host.ps1 through Windows PowerShell, using the repository
+  root as the working directory.
+
+  The target is conhost.exe, not powershell.exe directly. Windows 11 may host console apps in
+  Windows Terminal, where the console is a pseudo-window that cannot be hidden. conhost.exe forces
+  the classic console window, which the minimize-to-tray feature needs.
 #>
 [CmdletBinding()]
 param()
@@ -14,7 +18,7 @@ $repo      = Split-Path -Parent $scriptDir
 $starter   = Join-Path $scriptDir 'start-wb-host.ps1'
 $desktop   = [Environment]::GetFolderPath('Desktop')
 $lnkPath   = Join-Path $desktop 'WorkBuddy.lnk'
-$psExe     = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$conhost   = Join-Path $env:SystemRoot 'System32\conhost.exe'
 
 if (-not (Test-Path -LiteralPath $starter)) {
     throw "Launcher script not found: $starter"
@@ -41,8 +45,8 @@ if ((Test-Path -LiteralPath $imageres) -and ((Get-IconCount -Path $imageres) -gt
 
 $shell = New-Object -ComObject WScript.Shell
 $sc = $shell.CreateShortcut($lnkPath)
-$sc.TargetPath       = $psExe
-$sc.Arguments        = "-NoProfile -ExecutionPolicy Bypass -File `"$starter`""
+$sc.TargetPath       = $conhost
+$sc.Arguments        = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$starter`""
 $sc.WorkingDirectory = $repo
 $sc.WindowStyle      = 1
 $sc.Description      = 'Start the WorkBuddy iPad display host'
@@ -50,4 +54,6 @@ $sc.IconLocation     = $iconLocation
 $sc.Save()
 
 Write-Output "Created shortcut: $lnkPath"
+Write-Output "  Target: $($sc.TargetPath)"
+Write-Output "  Arguments: $($sc.Arguments)"
 Write-Output "  Icon: $iconLocation"
