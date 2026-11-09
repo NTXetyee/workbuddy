@@ -23,6 +23,18 @@
             <height>1488</height>
             <refresh_rate>60</refresh_rate>
         </resolution>
+        <!-- 2266 is not a multiple of 8 and Windows did not offer 2266x1488 on first install;
+             2264/2272 wide are near-identical aspect fallbacks (the iPad aspect-fits). -->
+        <resolution>
+            <width>2264</width>
+            <height>1488</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>2272</width>
+            <height>1488</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
         <resolution>
             <width>1488</width>
             <height>2266</height>

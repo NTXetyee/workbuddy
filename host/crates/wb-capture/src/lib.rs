@@ -5,6 +5,7 @@
 //! released immediately.
 
 use std::fmt;
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use windows::core::Interface;
@@ -26,6 +27,10 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwareness, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, PROCESS_PER_MONITOR_DPI_AWARE,
+};
 
 pub use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 
@@ -103,6 +108,25 @@ fn wide_to_string(w: &[u16]) -> String {
     String::from_utf16_lossy(&w[..end])
 }
 
+/// Opts the process into per-monitor DPI awareness so that DXGI reports
+/// physical pixels instead of DPI-virtualized sizes. Failure is ignored: the
+/// awareness may already have been set by the host, or the call may be
+/// unsupported on this Windows version.
+fn ensure_dpi_aware() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| unsafe {
+        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
+            let _ = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+        }
+    });
+}
+
+/// Physical size of a duplicated output, as reported by the duplication itself.
+fn duplication_size(dup: &IDXGIOutputDuplication) -> (u32, u32) {
+    let desc = unsafe { dup.GetDesc() };
+    (desc.ModeDesc.Width, desc.ModeDesc.Height)
+}
+
 fn enumerate() -> Result<Vec<Entry>, CaptureError> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
     let mut entries: Vec<Entry> = Vec::new();
@@ -146,6 +170,7 @@ fn enumerate() -> Result<Vec<Entry>, CaptureError> {
 
 /// Lists every output across all adapters, in enumeration order.
 pub fn list_outputs() -> Result<Vec<OutputInfo>, CaptureError> {
+    ensure_dpi_aware();
     Ok(enumerate()?.into_iter().map(|e| e.info).collect())
 }
 
@@ -228,6 +253,7 @@ pub struct Capturer {
 impl Capturer {
     /// Creates a D3D11 device on the selected output's adapter and starts duplication.
     pub fn new(sel: OutputSel) -> Result<Self, CaptureError> {
+        ensure_dpi_aware();
         let entries = enumerate()?;
         let idx = select(&entries, &sel)?;
         let info = entries[idx].info.clone();
@@ -250,7 +276,15 @@ impl Capturer {
 
         let output1: IDXGIOutput1 = output.cast()?;
         let dup = unsafe { output1.DuplicateOutput(&device)? };
-        let ring = alloc_ring(&device, info.width, info.height)?;
+        // Real pixels from the duplication itself, independent of DPI scaling.
+        let (width, height) = duplication_size(&dup);
+        if width == 0 || height == 0 {
+            return Err(CaptureError::Message(format!(
+                "output {} duplication reports no size",
+                info.index
+            )));
+        }
+        let ring = alloc_ring(&device, width, height)?;
 
         Ok(Capturer {
             device,
@@ -259,8 +293,8 @@ impl Capturer {
             dup: Some(dup),
             ring,
             next_slot: 0,
-            width: info.width,
-            height: info.height,
+            width,
+            height,
             produced: false,
         })
     }
@@ -366,12 +400,7 @@ impl Capturer {
 
     fn recreate(&mut self) -> Result<(), CaptureError> {
         let dup = unsafe { self.output.DuplicateOutput(&self.device)? };
-        let desc = unsafe { self.output.GetDesc()? };
-        let r = desc.DesktopCoordinates;
-        let (w, h) = (
-            (r.right - r.left).max(0) as u32,
-            (r.bottom - r.top).max(0) as u32,
-        );
+        let (w, h) = duplication_size(&dup);
         if w > 0 && h > 0 && (w, h) != (self.width, self.height) {
             self.resize(w, h)?;
         }

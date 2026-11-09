@@ -31,3 +31,23 @@ fn capture_primary_frame() {
     assert_eq!(desc.Height, h);
     assert_eq!(desc.Format, DXGI_FORMAT_B8G8R8A8_UNORM);
 }
+
+#[test]
+fn size_matches_texture() {
+    let mut cap = Capturer::new(OutputSel::Primary).expect("Capturer::new failed");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let frame = loop {
+        if let Some(f) = cap.next_frame(100).expect("next_frame failed") {
+            break f;
+        }
+        assert!(Instant::now() < deadline, "no frame within 3 s");
+    };
+    let (w, h) = cap.size();
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { frame.texture.GetDesc(&mut desc) };
+    assert_eq!(
+        (desc.Width, desc.Height),
+        (w, h),
+        "size() must match frame texture"
+    );
+}

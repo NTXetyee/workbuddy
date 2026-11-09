@@ -25,10 +25,16 @@ param(
     [switch]$Uninstall,
     [string]$DriverUrl = 'https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip',
     [string]$NefConUrl = 'https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip',
-    [string]$SettingsSource = (Join-Path $PSScriptRoot 'vdd-settings.xml'),
+    [string]$SettingsSource = '',
     [string]$SettingsDir = 'C:\VirtualDisplayDriver',
     [switch]$ElevatedRelaunch
 )
+
+# $PSScriptRoot can be empty inside param() defaults on Windows PowerShell 5.1, so resolve it here.
+if (-not $SettingsSource) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $SettingsSource = Join-Path $scriptDir 'vdd-settings.xml'
+}
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -166,8 +172,11 @@ try {
     Write-Step 'Installing driver (nefconw install MttVDD.inf Root\MttVDD)'
     Push-Location $infDir
     try {
-        & $nefconw.FullName install (Join-Path $infDir 'MttVDD.inf') 'Root\MttVDD'
-        $code = $LASTEXITCODE
+        # nefconw.exe is a windowless (GUI-subsystem) exe: '&' does not wait for it and leaves
+        # $LASTEXITCODE empty, so run it with Start-Process -Wait and read the real exit code.
+        $infPath = Join-Path $infDir 'MttVDD.inf'
+        $proc = Start-Process -FilePath $nefconw.FullName -ArgumentList @('install', "`"$infPath`"", 'Root\MttVDD') -Wait -PassThru -WindowStyle Hidden
+        $code = $proc.ExitCode
     } finally {
         Pop-Location
     }
