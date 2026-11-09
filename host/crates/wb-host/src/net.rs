@@ -127,15 +127,10 @@ pub fn run_session<S: FrameSource>(
     };
 
     let mut sink = ChannelSink { tx };
+    let rate_base = Mutex::new(None);
     let extra = || {
-        lock(&shared.ipad_stats)
-            .as_ref()
-            .map_or_else(String::new, |s| {
-                format!(
-                    " ipad_dec={} ipad_drop={}",
-                    s.frames_decoded, s.frames_dropped
-                )
-            })
+        let stats = lock(&shared.ipad_stats).clone();
+        ipad_suffix(stats.as_ref(), &mut lock(&rate_base), Instant::now())
     };
     let mut should_stop = || stop.load(SeqCst) || shared.session_over.load(SeqCst);
     let run = pipeline::run_loop(
@@ -166,6 +161,38 @@ pub fn run_session<S: FrameSource>(
         (None, Some(e), false) => SessionEnd::Failed(e),
         (None, None, false) => reader_end,
     }
+}
+
+/// Counters from the previous stats line: when it was printed and the iPad's decoded and
+/// dropped totals at that time.
+type RateBase = Option<(Instant, u32, u32)>;
+
+/// The iPad part of the once-per-second stats line. Empty until a STATS message has arrived.
+/// `ipad_dec_fps` and `ipad_drop_ps` are the iPad counter deltas since the previous stats line,
+/// per second. The first line that has stats has no previous line, so both are 0.0 there.
+fn ipad_suffix(stats: Option<&Stats>, base: &mut RateBase, now: Instant) -> String {
+    let Some(s) = stats else {
+        return String::new();
+    };
+    let (dec_ps, drop_ps) = match *base {
+        Some((t0, dec0, drop0)) => {
+            let secs = now.duration_since(t0).as_secs_f64().max(f64::EPSILON);
+            (
+                f64::from(s.frames_decoded.saturating_sub(dec0)) / secs,
+                f64::from(s.frames_dropped.saturating_sub(drop0)) / secs,
+            )
+        }
+        None => (0.0, 0.0),
+    };
+    *base = Some((now, s.frames_decoded, s.frames_dropped));
+    format!(
+        " ipad_dec={} ipad_drop={} ipad_dec_ms={:.1} ipad_dec_fps={:.1} ipad_drop_ps={:.1}",
+        s.frames_decoded,
+        s.frames_dropped,
+        f64::from(s.last_decode_us) / 1000.0,
+        dec_ps,
+        drop_ps
+    )
 }
 
 /// Reads until HELLO arrives. Anything before it is ignored. The decoder keeps any bytes that
@@ -270,5 +297,64 @@ impl FrameSink for ChannelSink {
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => Err("writer thread stopped".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(decoded: u32, dropped: u32, decode_us: u32) -> Stats {
+        Stats {
+            frames_decoded: decoded,
+            frames_dropped: dropped,
+            last_decode_us: decode_us,
+        }
+    }
+
+    #[test]
+    fn no_suffix_before_first_stats() {
+        let mut base = None;
+        assert_eq!(ipad_suffix(None, &mut base, Instant::now()), "");
+        assert!(base.is_none());
+    }
+
+    #[test]
+    fn first_stats_line_has_zero_rates() {
+        let mut base = None;
+        let s = stats(100, 3, 12_345);
+        assert_eq!(
+            ipad_suffix(Some(&s), &mut base, Instant::now()),
+            " ipad_dec=100 ipad_drop=3 ipad_dec_ms=12.3 ipad_dec_fps=0.0 ipad_drop_ps=0.0"
+        );
+    }
+
+    #[test]
+    fn rates_are_deltas_per_second() {
+        let mut base = None;
+        let t0 = Instant::now();
+        ipad_suffix(Some(&stats(100, 3, 1_000)), &mut base, t0);
+        let s = stats(160, 5, 2_500);
+        let line = ipad_suffix(Some(&s), &mut base, t0 + Duration::from_secs(2));
+        assert_eq!(
+            line,
+            " ipad_dec=160 ipad_drop=5 ipad_dec_ms=2.5 ipad_dec_fps=30.0 ipad_drop_ps=1.0"
+        );
+    }
+
+    #[test]
+    fn counter_reset_does_not_underflow() {
+        let mut base = None;
+        let t0 = Instant::now();
+        ipad_suffix(Some(&stats(500, 9, 1_000)), &mut base, t0);
+        let line = ipad_suffix(
+            Some(&stats(10, 0, 1_000)),
+            &mut base,
+            t0 + Duration::from_secs(1),
+        );
+        assert!(
+            line.ends_with("ipad_dec_fps=0.0 ipad_drop_ps=0.0"),
+            "{line}"
+        );
     }
 }

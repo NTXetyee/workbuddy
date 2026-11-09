@@ -39,3 +39,11 @@ Tray icon, orientation follow, touch -> InjectTouchInput, direct NVENC + intra-r
 Live stream over USB works. Measured: ~33 fps (target 60), enc_ms 12-14 under real content (3-5 ms in synthetic dump), ipad_drop 4-5 of ~600, 0 host drops.
 Next candidates: (a) find why fps is ~33 and encode ms is 3x the synthetic number (capture pacing / VideoProcessor / MFT warm-up / GPU clocks); (b) glass-to-glass measurement; (c) touch input; (d) rotation; (e) tray; (f) direct NVENC.
 
+
+## Tuning round 1 (2026-11-09)
+- Cause 1: NVIDIA dGPU idled in P8 (~680 MHz) -> encode 12-14 ms. Locking clocks (nvidia-smi -lgc 1800,3090, admin, temporary) -> 5-8 ms. Lasting fix TODO (per-app 'Prefer maximum performance' or GPU keepalive).
+- Cause 2: pacing bug in CaptureEncoder (24 ms period -> ~42 fps). Fixed (should_encode). Under motion: 60.0 fps host, 59-60 fps iPad decode, 0 drops, enc ~7.8 ms, iPad decode ~11 ms.
+- Open: iPad decoder enters drop-until-keyframe mode for ~2 s when motion starts after idle (burst of large frames, in-flight > 2). Fix in ios/WorkBuddy/Video/VideoDecoder.swift in the next iOS batch (needs a re-sideload).
+- Open: static-screen repeats still cost 6-12 Mbps at ~32 fps (CBR); consider lower repeat rate.
+- Open: real glass-to-glass measurement; est. now ~40-45 ms (cap phase ~8, enc ~8, USB ~3, iPad decode ~11, present ~8).
+

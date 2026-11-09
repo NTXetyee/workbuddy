@@ -5,8 +5,9 @@
 
 use std::collections::VecDeque;
 use std::error::Error as StdError;
+use std::ffi::c_void;
 use std::fmt;
-use std::mem::ManuallyDrop;
+use std::mem::{size_of, ManuallyDrop};
 use std::ptr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -16,15 +17,17 @@ pub use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::core::{IUnknown, Interface, GUID};
 use windows::Win32::Foundation::{RECT, TRUE, VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11DeviceContext, ID3D11Multithread, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11Query, ID3D11VideoContext, ID3D11VideoDevice,
     ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
-    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_QUERY,
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT, D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP,
+    D3D11_QUERY_TIMESTAMP_DISJOINT, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -48,6 +51,27 @@ pub struct EncodedFrame {
     pub keyframe: bool,
     pub has_params: bool,
     pub pts_us: u64,
+}
+
+/// Encoder counters since the last [`Encoder::take_stats`] call (measurement only).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct EncodeStats {
+    /// Frames accepted by `ProcessInput`. The averages below divide by this.
+    pub frames: u64,
+    /// CPU submit time of the VideoProcessorBlt (BGRA -> NV12 and scale).
+    pub convert_total: Duration,
+    /// `ProcessInput` through the output wait at the end of `encode`.
+    pub mft_total: Duration,
+    /// Time spent waiting for METransformNeedInput.
+    pub input_wait_total: Duration,
+    /// GPU time of the VideoProcessorBlt, from timestamp queries. Only samples whose results
+    /// were ready are included, so this can lag the other totals by a frame or two.
+    /// Caveat: on the development machine's GPU driver the begin and end timestamps came back
+    /// equal or tens of nanoseconds apart, so this does NOT measure the Blt there. Treat it as
+    /// unreliable until it is validated on another driver or with GPU tracing.
+    pub gpu_convert_total: Duration,
+    /// Number of GPU samples in `gpu_convert_total`.
+    pub gpu_samples: u64,
 }
 
 /// Errors from the encoder. `Windows` carries the failing call name and the HRESULT.
@@ -149,6 +173,7 @@ pub struct Encoder {
     /// NAL length size used when the transform emits AVCC.
     nal_len: usize,
     frame_dur_100ns: i64,
+    stats: EncodeStats,
     /// Kept alive for the transform's lifetime (the transform references it).
     _mgr: IMFDXGIDeviceManager,
     _mf: MfGuard,
@@ -225,6 +250,7 @@ impl Encoder {
             params: Vec::new(),
             nal_len: 4,
             frame_dur_100ns: 10_000_000 / cfg.fps as i64,
+            stats: EncodeStats::default(),
             _mgr: mgr,
             _mf: mf,
         };
@@ -243,11 +269,15 @@ impl Encoder {
         if force_idr {
             self.force_idr();
         }
-        if !self.pump(INPUT_WAIT, |s| s.need_input > 0)? {
+        let wait_started = Instant::now();
+        let ready = self.pump(INPUT_WAIT, |s| s.need_input > 0)?;
+        self.stats.input_wait_total += wait_started.elapsed();
+        if !ready {
             return Ok(self.out_queue.pop_front());
         }
 
-        let nv12 = self.conv.convert(tex)?;
+        let (nv12, blt) = self.conv.convert(tex)?;
+        self.stats.convert_total += blt;
         let sample = make_sample(
             &nv12,
             self.cfg.width,
@@ -255,6 +285,7 @@ impl Encoder {
             pts_us,
             self.frame_dur_100ns,
         )?;
+        let mft_started = Instant::now();
         let r = unsafe { self.mft.ProcessInput(self.in_id, &sample, 0) };
         match r {
             Ok(()) => {}
@@ -269,11 +300,23 @@ impl Encoder {
                 })
             }
         }
+        self.stats.frames += 1;
         self.need_input = self.need_input.saturating_sub(1);
         self.pts_queue.push_back(pts_us);
 
         self.pump(OUTPUT_WAIT, |s| !s.out_queue.is_empty())?;
+        self.stats.mft_total += mft_started.elapsed();
         Ok(self.out_queue.pop_front())
+    }
+
+    /// Returns the counters accumulated since the previous call and resets them.
+    pub fn take_stats(&mut self) -> EncodeStats {
+        let mut s = std::mem::take(&mut self.stats);
+        self.conv.gpu.poll();
+        let (gpu_total, gpu_samples) = self.conv.gpu.take();
+        s.gpu_convert_total = gpu_total;
+        s.gpu_samples = gpu_samples;
+        s
     }
 
     /// Name of the DXGI adapter the encoder runs on (the device's adapter).
@@ -773,10 +816,149 @@ fn make_sample(
     Ok(s)
 }
 
+/// Query sets in flight for the GPU timer. Each Blt uses one set until its results are read.
+const GPU_QUERY_SETS: usize = 8;
+
+/// Three timestamp queries: the disjoint clock-frequency query and the begin/end timestamps.
+struct QuerySet {
+    disjoint: ID3D11Query,
+    begin: ID3D11Query,
+    end: ID3D11Query,
+}
+
+/// Measures the GPU time of the VideoProcessorBlt with D3D11 timestamp queries.
+///
+/// Results are read without blocking (`GetData` with no flags). A set that is not ready yet
+/// stays pending and is read on a later call. When every set is pending, the Blt is simply not
+/// timed, so measurement never stalls the GPU or the encode loop.
+struct GpuTimer {
+    ctx: ID3D11DeviceContext,
+    free: Vec<QuerySet>,
+    pending: VecDeque<QuerySet>,
+    total: Duration,
+    samples: u64,
+}
+
+fn make_query(device: &ID3D11Device, kind: D3D11_QUERY) -> Option<ID3D11Query> {
+    let desc = D3D11_QUERY_DESC {
+        Query: kind,
+        MiscFlags: 0,
+    };
+    let mut q: Option<ID3D11Query> = None;
+    unsafe { device.CreateQuery(&desc, Some(&mut q as *mut _)) }.ok()?;
+    q
+}
+
+/// Reads one timestamp. Zero means "not ready" (a real counter value is never zero here).
+fn read_timestamp(ctx: &ID3D11DeviceContext, q: &ID3D11Query) -> Option<u64> {
+    let mut v = 0u64;
+    unsafe {
+        ctx.GetData(
+            q,
+            Some(&mut v as *mut u64 as *mut c_void),
+            size_of::<u64>() as u32,
+            0,
+        )
+    }
+    .ok()?;
+    (v != 0).then_some(v)
+}
+
+impl GpuTimer {
+    /// Creates the query pool. If queries cannot be created, timing is simply disabled.
+    fn new(device: &ID3D11Device, ctx: ID3D11DeviceContext) -> Self {
+        let mut free = Vec::with_capacity(GPU_QUERY_SETS);
+        for _ in 0..GPU_QUERY_SETS {
+            let disjoint = make_query(device, D3D11_QUERY_TIMESTAMP_DISJOINT);
+            let begin = make_query(device, D3D11_QUERY_TIMESTAMP);
+            let end = make_query(device, D3D11_QUERY_TIMESTAMP);
+            match (disjoint, begin, end) {
+                (Some(disjoint), Some(begin), Some(end)) => free.push(QuerySet {
+                    disjoint,
+                    begin,
+                    end,
+                }),
+                _ => break,
+            }
+        }
+        GpuTimer {
+            ctx,
+            free,
+            pending: VecDeque::new(),
+            total: Duration::ZERO,
+            samples: 0,
+        }
+    }
+
+    /// Starts a timed region. Returns `None` when no query set is free.
+    fn begin(&mut self) -> Option<QuerySet> {
+        let set = self.free.pop()?;
+        unsafe {
+            self.ctx.Begin(&set.disjoint);
+            self.ctx.End(&set.begin);
+        }
+        Some(set)
+    }
+
+    /// Ends a timed region started by [`GpuTimer::begin`].
+    fn end(&mut self, set: QuerySet) {
+        unsafe {
+            self.ctx.End(&set.end);
+            self.ctx.End(&set.disjoint);
+        }
+        self.pending.push_back(set);
+    }
+
+    /// Collects every pending sample whose results are ready, in submission order.
+    fn poll(&mut self) {
+        while let Some(front) = self.pending.front() {
+            let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+            let got = unsafe {
+                self.ctx.GetData(
+                    &front.disjoint,
+                    Some(&mut dj as *mut _ as *mut c_void),
+                    size_of::<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT>() as u32,
+                    0,
+                )
+            };
+            if got.is_err() {
+                // Device trouble: drop this sample and keep the set for reuse.
+                if let Some(set) = self.pending.pop_front() {
+                    self.free.push(set);
+                }
+                continue;
+            }
+            if dj.Frequency == 0 {
+                break; // not ready; queries complete in order, so stop here
+            }
+            let front = self.pending.front().expect("checked above");
+            let begin = read_timestamp(&self.ctx, &front.begin);
+            let end = read_timestamp(&self.ctx, &front.end);
+            let set = self.pending.pop_front().expect("checked above");
+            if let (Some(b), Some(e), false) = (begin, end, dj.Disjoint.as_bool()) {
+                if e >= b {
+                    self.total += Duration::from_secs_f64((e - b) as f64 / dj.Frequency as f64);
+                    self.samples += 1;
+                }
+            }
+            self.free.push(set);
+        }
+    }
+
+    /// Returns the GPU time and sample count since the previous call and resets them.
+    fn take(&mut self) -> (Duration, u64) {
+        let out = (self.total, self.samples);
+        self.total = Duration::ZERO;
+        self.samples = 0;
+        out
+    }
+}
+
 /// BGRA -> NV12 conversion and scaling with the D3D11 VideoProcessor.
 struct Converter {
     vdev: ID3D11VideoDevice,
     vctx: ID3D11VideoContext,
+    gpu: GpuTimer,
     out_w: u32,
     out_h: u32,
     fps: u32,
@@ -823,9 +1005,11 @@ impl Converter {
                 .push(tex.ok_or_else(|| EncodeError::Config("NV12 texture not created".into()))?);
         }
 
+        let gpu = GpuTimer::new(device, ctx);
         Ok(Converter {
             vdev,
             vctx,
+            gpu,
             out_w: cfg.width,
             out_h: cfg.height,
             fps: cfg.fps,
@@ -952,8 +1136,12 @@ impl Converter {
         Ok(v)
     }
 
-    /// Converts and scales `src` into the next ring NV12 texture and returns it.
-    fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D, EncodeError> {
+    /// Converts and scales `src` into the next ring NV12 texture. Returns the texture and the CPU
+    /// submit time of the VideoProcessorBlt.
+    fn convert(
+        &mut self,
+        src: &ID3D11Texture2D,
+    ) -> Result<(ID3D11Texture2D, Duration), EncodeError> {
         let mut d = D3D11_TEXTURE2D_DESC::default();
         unsafe { src.GetDesc(&mut d) };
         let (w, h) = (d.Width, d.Height);
@@ -981,6 +1169,9 @@ impl Converter {
             .processor
             .as_ref()
             .ok_or_else(|| EncodeError::Config("processor not built".into()))?;
+        self.gpu.poll();
+        let timing = self.gpu.begin();
+        let blt_started = Instant::now();
         let r = unsafe {
             self.vctx.VideoProcessorBlt(
                 proc,
@@ -989,10 +1180,14 @@ impl Converter {
                 std::slice::from_ref(&stream),
             )
         };
+        let blt = blt_started.elapsed();
+        if let Some(set) = timing {
+            self.gpu.end(set);
+        }
         // The stream holds a manually managed reference to the input view.
         unsafe { ManuallyDrop::drop(&mut stream.pInputSurface) };
         win("ID3D11VideoContext::VideoProcessorBlt", r)?;
-        Ok(self.ring_tex[idx].clone())
+        Ok((self.ring_tex[idx].clone(), blt))
     }
 }
 

@@ -89,6 +89,22 @@ pub enum OutputSel {
     NameContains(String),
 }
 
+/// Capture counters since the last [`Capturer::take_stats`] call (measurement only).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct CaptureStats {
+    /// New desktop images obtained (frames returned by `next_frame`).
+    pub acquired: u64,
+    /// Sum of `AccumulatedFrames` over the acquired frames. An average above 1 means the
+    /// duplication merged frames because the consumer was too slow.
+    pub accumulated_frames_sum: u64,
+    /// `AcquireNextFrame` calls that hit `DXGI_ERROR_WAIT_TIMEOUT`.
+    pub timeouts: u64,
+    /// Time spent inside `AcquireNextFrame`, including timeouts and mouse-only updates.
+    pub wait_total: Duration,
+    /// CPU submit time of `CopyResource` plus `ReleaseFrame`.
+    pub copy_total: Duration,
+}
+
 /// One captured frame. `texture` is an owned BGRA8 GPU copy.
 pub struct Frame {
     pub texture: ID3D11Texture2D,
@@ -248,6 +264,7 @@ pub struct Capturer {
     width: u32,
     height: u32,
     produced: bool,
+    stats: CaptureStats,
 }
 
 impl Capturer {
@@ -296,12 +313,18 @@ impl Capturer {
             width,
             height,
             produced: false,
+            stats: CaptureStats::default(),
         })
     }
 
     /// The D3D11 device that owns the returned frame textures.
     pub fn device(&self) -> &ID3D11Device {
         &self.device
+    }
+
+    /// Returns the counters accumulated since the previous call and resets them.
+    pub fn take_stats(&mut self) -> CaptureStats {
+        std::mem::take(&mut self.stats)
     }
 
     /// Current output size in pixels (width, height).
@@ -329,9 +352,15 @@ impl Capturer {
 
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
-            match unsafe { dup.AcquireNextFrame(wait_ms, &mut info, &mut resource) } {
+            let wait_started = Instant::now();
+            let acquired = unsafe { dup.AcquireNextFrame(wait_ms, &mut info, &mut resource) };
+            self.stats.wait_total += wait_started.elapsed();
+            match acquired {
                 Ok(()) => {}
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    self.stats.timeouts += 1;
+                    return Ok(None);
+                }
                 Err(e)
                     if e.code() == DXGI_ERROR_ACCESS_LOST
                         || e.code() == DXGI_ERROR_INVALID_CALL =>
@@ -344,8 +373,10 @@ impl Capturer {
             }
 
             // The frame is acquired: it must be released whatever happens below.
-            let result = self.take_frame(resource, info.LastPresentTime);
+            let result = self.take_frame(resource, info.LastPresentTime, info.AccumulatedFrames);
+            let release_started = Instant::now();
             let _ = unsafe { dup.ReleaseFrame() };
+            self.stats.copy_total += release_started.elapsed();
             if let Some(frame) = result? {
                 return Ok(Some(frame));
             }
@@ -359,6 +390,7 @@ impl Capturer {
         &mut self,
         resource: Option<IDXGIResource>,
         last_present_time: i64,
+        accumulated_frames: u32,
     ) -> Result<Option<Frame>, CaptureError> {
         let Some(resource) = resource else {
             return Ok(None);
@@ -379,7 +411,11 @@ impl Capturer {
         let dst = self.ring[slot].clone();
         let src_res: ID3D11Resource = src.cast()?;
         let dst_res: ID3D11Resource = dst.cast()?;
+        let copy_started = Instant::now();
         unsafe { self.context.CopyResource(&dst_res, &src_res) };
+        self.stats.copy_total += copy_started.elapsed();
+        self.stats.acquired += 1;
+        self.stats.accumulated_frames_sum += u64::from(accumulated_frames);
         self.produced = true;
 
         Ok(Some(Frame {
