@@ -1,7 +1,7 @@
 //! GPU-resident screen capture with DXGI Desktop Duplication (SPEC 3.3).
 //!
 //! Frames never leave the GPU: each acquired desktop image is copied into a
-//! private BGRA8 texture from a ring of two and the duplication frame is
+//! private BGRA8 texture from a ring of [`RING_SIZE`] and the duplication frame is
 //! released immediately.
 
 use std::fmt;
@@ -33,6 +33,11 @@ use windows::Win32::UI::HiDpi::{
 };
 
 pub use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
+
+/// Number of capture textures in the ring. A texture is reused only after this many newer
+/// copies, so a frame still being read by the encoder is not overwritten in practice.
+pub const RING_SIZE: usize = 3;
+const _: () = assert!(matches!(RING_SIZE, 2..=4));
 
 /// Errors from capture setup and frame acquisition.
 #[derive(Debug)]
@@ -103,6 +108,17 @@ pub struct CaptureStats {
     pub wait_total: Duration,
     /// CPU submit time of `CopyResource` plus `ReleaseFrame`.
     pub copy_total: Duration,
+}
+
+impl CaptureStats {
+    /// Adds the counters of `other` to `self`.
+    pub fn add(&mut self, other: &CaptureStats) {
+        self.acquired += other.acquired;
+        self.accumulated_frames_sum += other.accumulated_frames_sum;
+        self.timeouts += other.timeouts;
+        self.wait_total += other.wait_total;
+        self.copy_total += other.copy_total;
+    }
 }
 
 /// One captured frame. `texture` is an owned BGRA8 GPU copy.
@@ -227,8 +243,8 @@ fn alloc_ring(
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
-    let mut ring = Vec::with_capacity(2);
-    for _ in 0..2 {
+    let mut ring = Vec::with_capacity(RING_SIZE);
+    for _ in 0..RING_SIZE {
         let mut tex: Option<ID3D11Texture2D> = None;
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex as *mut _))? };
         ring.push(
@@ -407,7 +423,7 @@ impl Capturer {
         }
 
         let slot = self.next_slot;
-        self.next_slot = (slot + 1) % self.ring.len();
+        self.next_slot = (slot + 1) % RING_SIZE;
         let dst = self.ring[slot].clone();
         let src_res: ID3D11Resource = src.cast()?;
         let dst_res: ID3D11Resource = dst.cast()?;

@@ -32,8 +32,13 @@ fn main() {
         fps: FPS,
         bitrate_kbps: 20_000,
     };
+    // Honours WB_ENCODER=nvenc|mft; unset selects NVENC on NVIDIA and MFT otherwise.
     let mut enc = Encoder::new(&device, cfg).expect("Encoder::new");
-    println!("adapter: {}", enc.adapter_name());
+    println!(
+        "adapter: {}, backend: {}",
+        enc.adapter_name(),
+        enc.backend().name()
+    );
 
     let mut src = common::Source::new(&device, W, H);
     let mut file = BufWriter::new(File::create(out_path).expect("create output file"));

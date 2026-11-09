@@ -81,6 +81,7 @@ fn encode_opts(args: &Args, repeat_after: Duration) -> EncodeOpts {
         bitrate_kbps: args.bitrate_kbps,
         size: args.size,
         repeat_after,
+        idle_fps: args.idle_fps,
     }
 }
 

@@ -9,6 +9,7 @@ usage: wb-host [options]
 
   --output <index|name>      output to capture (default: primary)
   --fps <n>                  target frame rate (default 60)
+  --idle-fps <n>             repeat rate while the screen is unchanged, 1..=60 (default 5)
   --bitrate-kbps <n>         H.264 bitrate in kbit/s (default 20000)
   --port <n>                 iPad TCP port (default 7878)
   --list-outputs             list capturable outputs and exit
@@ -41,6 +42,8 @@ pub struct Args {
     pub mode: Mode,
     pub output: OutputSpec,
     pub fps: u32,
+    /// Re-encode rate of an unchanged screen.
+    pub idle_fps: u32,
     pub bitrate_kbps: u32,
     pub port: u16,
     pub seconds: u64,
@@ -58,6 +61,7 @@ where
         mode: Mode::Serve,
         output: OutputSpec::Primary,
         fps: 60,
+        idle_fps: 5,
         bitrate_kbps: 20_000,
         port: 7878,
         seconds: 10,
@@ -75,6 +79,9 @@ where
             "--output" => out.output = parse_output(&take_value(flag, inline, &mut rest)?)?,
             "--fps" => {
                 out.fps = number(flag, &take_value(flag, inline, &mut rest)?, 1, 240)?;
+            }
+            "--idle-fps" => {
+                out.idle_fps = number(flag, &take_value(flag, inline, &mut rest)?, 1, 60)?;
             }
             "--bitrate-kbps" => {
                 out.bitrate_kbps =
@@ -202,7 +209,15 @@ mod tests {
             (a.fps, a.bitrate_kbps, a.port, a.seconds),
             (60, 20_000, 7878, 10)
         );
+        assert_eq!(a.idle_fps, 5);
         assert_eq!(a.size, None);
+    }
+
+    #[test]
+    fn idle_fps_parses_both_forms() {
+        assert_eq!(p(&["--idle-fps", "2"]).unwrap().idle_fps, 2);
+        assert_eq!(p(&["--idle-fps=60"]).unwrap().idle_fps, 60);
+        assert_eq!(p(&["--idle-fps", "1"]).unwrap().idle_fps, 1);
     }
 
     #[test]
@@ -262,6 +277,8 @@ mod tests {
     fn out_of_range_values_are_rejected() {
         assert!(p(&["--fps", "0"]).is_err());
         assert!(p(&["--fps", "1000"]).is_err());
+        assert!(p(&["--idle-fps", "0"]).is_err());
+        assert!(p(&["--idle-fps", "61"]).is_err());
         assert!(p(&["--port", "0"]).is_err());
         assert!(p(&["--bitrate-kbps", "5"]).is_err());
         assert!(p(&["--seconds", "0"]).is_err());
