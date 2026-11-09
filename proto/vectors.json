@@ -1,0 +1,92 @@
+[
+  {
+    "name": "ping_golden",
+    "seq": 1,
+    "hex": "5742010501000000080000000807060504030201",
+    "message": {"type": "Ping", "timestamp_us": 72623859790382856}
+  },
+  {
+    "name": "keyframe_request_golden",
+    "seq": 2,
+    "hex": "574201040200000000000000",
+    "message": {"type": "KeyframeRequest"}
+  },
+  {
+    "name": "config_golden",
+    "seq": 3,
+    "hex": "57420102030000000c0000000100da08d0053c00204e0000",
+    "message": {"type": "Config", "codec": 1, "width": 2266, "height": 1488, "fps": 60, "bitrate_kbps": 20000}
+  },
+  {
+    "name": "hello_sumers_ipad",
+    "seq": 4,
+    "hex": "57420101040000001700000001010000da08d0053c000c53756d657227732069506164",
+    "message": {"type": "Hello", "proto_version": 1, "codecs": 1, "orientation": 0, "native_width": 2266, "native_height": 1488, "max_fps": 60, "name": "Sumer's iPad"}
+  },
+  {
+    "name": "hello_empty_name",
+    "seq": 5,
+    "hex": "57420101050000000b00000001010000da08d0053c0000",
+    "message": {"type": "Hello", "proto_version": 1, "codecs": 1, "orientation": 0, "native_width": 2266, "native_height": 1488, "max_fps": 60, "name": ""}
+  },
+  {
+    "name": "hello_name_255",
+    "seq": 6,
+    "hex": "57420101060000000a01000001010000da08d0053c00ff303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738394142434445",
+    "message": {"type": "Hello", "proto_version": 1, "codecs": 1, "orientation": 0, "native_width": 2266, "native_height": 1488, "max_fps": 60, "name": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789ABCDE"}
+  },
+  {
+    "name": "video_keyframe_with_params",
+    "seq": 7,
+    "hex": "57420103070000002400000040420f000000000003000000000000016742c01e0000000168ce3c800000000165888400",
+    "message": {"type": "Video", "pts_us": 1000000, "flags": 3, "data_hex": "000000016742c01e0000000168ce3c800000000165888400"}
+  },
+  {
+    "name": "video_nonkey",
+    "seq": 8,
+    "hex": "5742010308000000140000005b830f00000000000000000000000001419a246c",
+    "message": {"type": "Video", "pts_us": 1016667, "flags": 0, "data_hex": "00000001419a246c"}
+  },
+  {
+    "name": "ping_small",
+    "seq": 9,
+    "hex": "57420105090000000800000087d6120000000000",
+    "message": {"type": "Ping", "timestamp_us": 1234567}
+  },
+  {
+    "name": "pong",
+    "seq": 10,
+    "hex": "574201060a0000000800000087d6120000000000",
+    "message": {"type": "Pong", "timestamp_us": 1234567}
+  },
+  {
+    "name": "orientation_landscape",
+    "seq": 11,
+    "hex": "574201070b0000000100000000",
+    "message": {"type": "Orientation", "value": 0}
+  },
+  {
+    "name": "orientation_portrait",
+    "seq": 12,
+    "hex": "574201070c0000000100000001",
+    "message": {"type": "Orientation", "value": 1}
+  },
+  {
+    "name": "stats",
+    "seq": 13,
+    "hex": "574201080d0000000c000000100e0000020000004e070000",
+    "message": {"type": "Stats", "frames_decoded": 3600, "frames_dropped": 2, "last_decode_us": 1870}
+  },
+  {
+    "name": "bye",
+    "seq": 14,
+    "hex": "574201090e00000000000000",
+    "message": {"type": "Bye"}
+  },
+  {
+    "name": "unknown_type_7f",
+    "seq": 15,
+    "hex": "5742017f0f00000004000000deadbeef",
+    "message": {"type": "Unknown", "msg_type": 127, "payload_hex": "deadbeef"}
+  }
+]

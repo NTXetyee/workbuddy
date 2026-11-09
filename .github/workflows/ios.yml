@@ -1,0 +1,70 @@
+name: iOS
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Print toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Swift tests (WBProto)
+        working-directory: ios/WBProto
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build app (unsigned, Release, iphoneos)
+        working-directory: ios
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -project WorkBuddy.xcodeproj -scheme WorkBuddy -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee xcodebuild.log | tail -n 200
+
+      - name: Package IPA
+        working-directory: ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=build/Build/Products/Release-iphoneos/WorkBuddy.app
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: $APP not found"
+            exit 1
+          fi
+          rm -rf Payload WorkBuddy.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qr WorkBuddy.ipa Payload
+          rm -rf Payload
+          ls -la WorkBuddy.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkBuddy-ipa
+          path: ios/WorkBuddy.ipa
+          if-no-files-found: error
+
+      - name: Upload xcodebuild log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ios/xcodebuild.log
+          if-no-files-found: warn

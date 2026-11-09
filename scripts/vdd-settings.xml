@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WorkBuddy vdd_settings.xml for VirtualDrivers/Virtual-Display-Driver (T5).
+  Element names follow the upstream sample "Virtual Display Driver (HDR)/vdd_settings.xml"
+  on the master branch: https://github.com/VirtualDrivers/Virtual-Display-Driver
+  Installed to C:\VirtualDisplayDriver\vdd_settings.xml by scripts/install-vdd.ps1.
+  The upstream "global" refresh-rate list is intentionally omitted so that only
+  the 60 Hz modes below are advertised.
+-->
+<vdd_settings>
+
+    <monitors>
+        <count>1</count>
+    </monitors>
+
+    <gpu>
+        <friendlyname>NVIDIA GeForce RTX 5060 Laptop GPU</friendlyname>
+    </gpu>
+
+    <resolutions>
+        <resolution>
+            <width>2266</width>
+            <height>1488</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1488</width>
+            <height>2266</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1133</width>
+            <height>744</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1600</width>
+            <height>1050</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+    </resolutions>
+
+    <logging>
+        <SendLogsThroughPipe>true</SendLogsThroughPipe>
+        <logging>false</logging>
+        <debuglogging>false</debuglogging>
+    </logging>
+
+    <colour>
+        <SDR10bit>false</SDR10bit>
+        <HDRPlus>false</HDRPlus>
+        <ColourFormat>RGB</ColourFormat>
+    </colour>
+
+</vdd_settings>
