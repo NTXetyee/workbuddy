@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use wb_encode::EncodedFrame;
 use wb_proto::{Config, FrameDecoder, Hello, Message, Stats, Video};
 
-use crate::pipeline::{self, FrameSink, FrameSource};
+use crate::pipeline::{self, Extra, FrameSink, FrameSource, Tick};
+use crate::status;
 
 /// How long the iPad has to send HELLO after connecting.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -70,22 +71,24 @@ fn is_timeout(e: &io::Error) -> bool {
 /// Runs one session to completion on the calling thread.
 ///
 /// `make_config` receives the iPad's HELLO and returns the CONFIG to send. `source` produces the
-/// frames. The session ends on BYE, EOF, an I/O or protocol error, or when `stop` is set.
+/// frames and `report` gets one [`Tick`] per second while streaming. The session ends on BYE, EOF,
+/// an I/O or protocol error, or when `stop` is set.
 pub fn run_session<S: FrameSource>(
     mut stream: TcpStream,
     make_config: impl FnOnce(&Hello) -> Config,
     source: &mut S,
     stop: &AtomicBool,
+    report: &mut dyn FnMut(&Tick),
 ) -> SessionEnd {
     let (hello, dec) = match read_hello(&mut stream) {
         Ok(v) => v,
         Err(end) => return end,
     };
     let cfg = make_config(&hello);
-    eprintln!(
+    status::debug(&format!(
         "[net] iPad '{}' connected, native {}x{}, max {} fps",
         hello.name, hello.native_width, hello.native_height, hello.max_fps
-    );
+    ));
 
     if let Err(e) = stream.set_read_timeout(None) {
         return SessionEnd::Failed(format!("socket setup: {e}"));
@@ -130,7 +133,11 @@ pub fn run_session<S: FrameSource>(
     let rate_base = Mutex::new(None);
     let extra = || {
         let stats = lock(&shared.ipad_stats).clone();
-        ipad_suffix(stats.as_ref(), &mut lock(&rate_base), Instant::now())
+        let fields = ipad_suffix(stats.as_ref(), &mut lock(&rate_base), Instant::now());
+        Extra {
+            fields,
+            ipad_decode_ms: stats.as_ref().map(|s| f64::from(s.last_decode_us) / 1000.0),
+        }
     };
     let mut should_stop = || stop.load(SeqCst) || shared.session_over.load(SeqCst);
     let run = pipeline::run_loop(
@@ -139,6 +146,7 @@ pub fn run_session<S: FrameSource>(
         &shared.force_idr,
         &mut should_stop,
         &extra,
+        report,
     );
 
     let loop_err = run.err();

@@ -17,6 +17,21 @@ use std::time::Duration;
 
 pub use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 
+/// Whether diagnostic warnings are printed. Set by `WB_VERBOSE=1` (`wb-host --verbose` sets it).
+pub(crate) fn verbose_diagnostics() -> bool {
+    std::env::var_os("WB_VERBOSE").is_some_and(|v| v == "1")
+}
+
+/// Diagnostic warning on stderr, printed only in verbose mode. Errors and the NVENC fallback
+/// notice use `eprintln!` directly.
+macro_rules! log_diag {
+    ($($arg:tt)*) => {
+        if $crate::verbose_diagnostics() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 mod convert;
 mod mft;
 mod nvenc;
@@ -176,7 +191,7 @@ impl Encoder {
                 }
             }
         } else {
-            eprintln!(
+            log_diag!(
                 "wb-encode: adapter vendor 0x{:04x} is not NVIDIA; using Media Foundation",
                 info.vendor
             );

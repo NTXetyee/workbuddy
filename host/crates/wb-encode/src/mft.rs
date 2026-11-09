@@ -111,7 +111,7 @@ impl MftEncoder {
         if let Some(api) = &codec {
             apply_codec_settings(api, &cfg);
         } else {
-            eprintln!("wb-encode: transform exposes no ICodecAPI; using defaults");
+            log_diag!("wb-encode: transform exposes no ICodecAPI; using defaults");
         }
         let start_stream = || -> windows::core::Result<()> {
             unsafe {
@@ -224,7 +224,7 @@ impl MftEncoder {
         if let Some(api) = &self.codec {
             let v = variant_u32(1);
             if let Err(e) = unsafe { api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &v) } {
-                eprintln!("wb-encode: force keyframe failed: {e}");
+                log_diag!("wb-encode: force keyframe failed: {e}");
             }
         }
     }
@@ -419,7 +419,7 @@ fn create_transform(
         match setup_transform(&act, mgr, cfg) {
             Ok(v) => return Ok(v),
             Err(e) => {
-                eprintln!("wb-encode: candidate encoder rejected: {e}");
+                log_diag!("wb-encode: candidate encoder rejected: {e}");
                 last = e;
             }
         }
@@ -506,7 +506,7 @@ fn setup_transform(
         attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
     })?;
     if let Err(e) = unsafe { attrs.SetUINT32(&MF_LOW_LATENCY, 1) } {
-        eprintln!("wb-encode: MF_LOW_LATENCY not accepted: {e}");
+        log_diag!("wb-encode: MF_LOW_LATENCY not accepted: {e}");
     }
 
     let mgr_ptr = mgr.as_raw() as usize;
@@ -634,7 +634,7 @@ fn apply_codec_settings(api: &ICodecAPI, cfg: &EncoderConfig) {
         let as_bool = unsafe { api.SetValue(&guid, &variant_bool(on)) };
         if as_bool.is_err() && unsafe { api.SetValue(&guid, &variant_u32(on as u32)) }.is_err() {
             let e = as_bool.err().unwrap_or_else(windows::core::Error::empty);
-            eprintln!("wb-encode: {name} not applied: {e}");
+            log_diag!("wb-encode: {name} not applied: {e}");
         }
     }
     let values: [(&str, GUID, u32); 4] = [
@@ -661,7 +661,7 @@ fn apply_codec_settings(api: &ICodecAPI, cfg: &EncoderConfig) {
     ];
     for (name, guid, v) in values {
         if let Err(e) = unsafe { api.SetValue(&guid, &variant_u32(v)) } {
-            eprintln!("wb-encode: {name} not applied: {e}");
+            log_diag!("wb-encode: {name} not applied: {e}");
         }
     }
 }

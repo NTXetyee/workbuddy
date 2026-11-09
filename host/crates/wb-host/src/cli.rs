@@ -16,6 +16,7 @@ usage: wb-host [options]
   --dump <file.h264>         write the Annex-B stream to a file instead of serving the iPad
   --seconds <n>              length of a --dump run (default 10)
   --width <w> --height <h>   encode size (default: capture size rounded down to even)
+  -v, --verbose              print every diagnostic line and the per-second stats
   -h, --help                 show this help";
 
 /// Which output to capture, as typed on the command line.
@@ -49,6 +50,8 @@ pub struct Args {
     pub seconds: u64,
     /// Encode size override; `None` means the capture size.
     pub size: Option<(u32, u32)>,
+    /// Print every diagnostic line and the per-second stats (`--verbose` / `-v`).
+    pub verbose: bool,
 }
 
 /// Parses the arguments after the program name. Accepts `--flag value` and `--flag=value`.
@@ -66,6 +69,7 @@ where
         port: 7878,
         seconds: 10,
         size: None,
+        verbose: false,
     };
     let mut help = false;
     let mut list = false;
@@ -115,6 +119,10 @@ where
             "--list-outputs" => {
                 no_value(flag, inline)?;
                 list = true;
+            }
+            "--verbose" | "-v" => {
+                no_value(flag, inline)?;
+                out.verbose = true;
             }
             "--help" | "-h" => {
                 no_value(flag, inline)?;
@@ -293,5 +301,33 @@ mod tests {
     #[test]
     fn flag_without_value_rejects_equals_form() {
         assert!(p(&["--list-outputs=yes"]).is_err());
+    }
+
+    #[test]
+    fn verbose_is_off_by_default() {
+        assert!(!p(&[]).unwrap().verbose);
+        assert!(!p(&["--dump", "out.h264"]).unwrap().verbose);
+    }
+
+    #[test]
+    fn verbose_long_and_short_forms() {
+        assert!(p(&["--verbose"]).unwrap().verbose);
+        assert!(p(&["-v"]).unwrap().verbose);
+        // Verbose does not change the mode.
+        assert_eq!(p(&["-v"]).unwrap().mode, Mode::Serve);
+        let a = p(&["--dump", "out.h264", "--verbose"]).unwrap();
+        assert!(a.verbose);
+        assert_eq!(a.mode, Mode::Dump(PathBuf::from("out.h264")));
+    }
+
+    #[test]
+    fn verbose_takes_no_value() {
+        assert!(p(&["--verbose=yes"]).is_err());
+    }
+
+    #[test]
+    fn usage_documents_verbose() {
+        assert!(USAGE.contains("--verbose"));
+        assert!(USAGE.contains("-v, --verbose"));
     }
 }

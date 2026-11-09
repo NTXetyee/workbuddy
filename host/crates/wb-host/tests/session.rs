@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use wb_encode::EncodedFrame;
 use wb_host::net::{run_session, SessionEnd};
-use wb_host::pipeline::{FrameSource, Produced};
+use wb_host::pipeline::{FrameSource, Produced, Tick};
 use wb_proto::{Config, FrameDecoder, Hello, Message};
 
 /// Produces synthetic Annex-B frames at roughly 200 fps. Keyframes are the forced ones.
@@ -194,7 +194,13 @@ fn handshake_video_keyframe_request_and_ping() {
     };
     let stop = AtomicBool::new(false);
     let to_send = expected.clone();
-    let end = run_session(host, move |_hello| to_send, &mut source, &stop);
+    let end = run_session(
+        host,
+        move |_hello| to_send,
+        &mut source,
+        &stop,
+        &mut |_: &Tick| {},
+    );
 
     let report = ipad
         .join()

@@ -500,10 +500,11 @@ impl LoopSummary {
     }
 }
 
-/// Counters for the once-per-second log line.
+/// Counters for the once-per-second report.
 struct Window {
     start: Instant,
     frames: u64,
+    sent: u64,
     bytes: u64,
     encode: Duration,
 }
@@ -513,42 +514,89 @@ impl Window {
         Self {
             start: Instant::now(),
             frames: 0,
+            sent: 0,
             bytes: 0,
             encode: Duration::ZERO,
         }
     }
 
-    fn line(&self, sum: &LoopSummary, extra: &str) -> String {
-        let secs = self.start.elapsed().as_secs_f64().max(f64::EPSILON);
-        let enc_ms = if self.frames == 0 {
+    /// Mean encode call time per encoded frame in this window, in ms (0 when no frame).
+    fn enc_ms(&self) -> f64 {
+        if self.frames == 0 {
             0.0
         } else {
             self.encode.as_secs_f64() * 1000.0 / self.frames as f64
-        };
-        format!(
-            "fps={:.1} enc_ms={:.2} kbps={:.0} sent={} dropped={}{}",
-            self.frames as f64 / secs,
-            enc_ms,
-            self.bytes as f64 * 8.0 / 1000.0 / secs,
-            sum.sent,
-            sum.dropped,
-            extra
-        )
+        }
     }
+}
+
+/// One once-per-second sample, handed to the `report` callback of [`run_loop`]. It holds the
+/// counts for the window that just ended and running totals for the loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tick {
+    /// Length of the window in seconds.
+    pub secs: f64,
+    /// Frames the source encoded in the window.
+    pub encoded: u64,
+    /// Frames the sink accepted in the window.
+    pub sent: u64,
+    /// Encoded bytes produced in the window.
+    pub bytes: u64,
+    /// Mean encode call time per encoded frame in the window, in ms.
+    pub enc_ms: f64,
+    /// Frames the sink accepted since the loop started.
+    pub total_sent: u64,
+    /// Frames the sink refused since the loop started.
+    pub total_dropped: u64,
+    /// Capture and encoder stage timings and iPad counters, each with a leading space.
+    pub fields: String,
+    /// The iPad's last decode time in ms, once it has sent stats.
+    pub ipad_decode_ms: Option<f64>,
+}
+
+/// What the caller adds to each [`Tick`]: the iPad part of the verbose line and its decode time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Extra {
+    pub fields: String,
+    pub ipad_decode_ms: Option<f64>,
+}
+
+/// The verbose once-per-second line with every field.
+pub fn verbose_line(tick: &Tick) -> String {
+    let secs = tick.secs.max(f64::EPSILON);
+    format!(
+        "fps={:.1} enc_ms={:.2} kbps={:.0} sent={} dropped={}{}",
+        tick.encoded as f64 / secs,
+        tick.enc_ms,
+        tick.bytes as f64 * 8.0 / 1000.0 / secs,
+        tick.total_sent,
+        tick.total_dropped,
+        tick.fields
+    )
 }
 
 /// Runs source -> sink until `should_stop` returns true. A refused frame sets `force_idr` so
 /// the next encode is a keyframe. After [`REFUSED_BACKOFF_AFTER`] refusals in a row the loop
 /// sleeps between attempts. If the sink refuses for [`STALL_TIMEOUT`] without accepting a frame,
-/// the loop returns an error. `extra` adds text to the once-per-second stats line.
+/// the loop returns an error. `extra` supplies the caller's part of each once-per-second tick,
+/// and `report` receives every tick.
 pub fn run_loop<S: FrameSource, K: FrameSink>(
     src: &mut S,
     sink: &mut K,
     force_idr: &AtomicBool,
     should_stop: &mut dyn FnMut() -> bool,
-    extra: &dyn Fn() -> String,
+    extra: &dyn Fn() -> Extra,
+    report: &mut dyn FnMut(&Tick),
 ) -> Result<LoopSummary, String> {
-    run_loop_with_stall(src, sink, force_idr, should_stop, extra, STALL_TIMEOUT)
+    run_loop_with_stall(
+        src,
+        sink,
+        force_idr,
+        should_stop,
+        extra,
+        report,
+        STALL_TIMEOUT,
+    )
 }
 
 /// [`run_loop`] with the stall limit passed in, so tests can use a short one.
@@ -557,7 +605,8 @@ fn run_loop_with_stall<S: FrameSource, K: FrameSink>(
     sink: &mut K,
     force_idr: &AtomicBool,
     should_stop: &mut dyn FnMut() -> bool,
-    extra: &dyn Fn() -> String,
+    extra: &dyn Fn() -> Extra,
+    report: &mut dyn FnMut(&Tick),
     stall_limit: Duration,
 ) -> Result<LoopSummary, String> {
     let mut sum = LoopSummary::default();
@@ -577,6 +626,7 @@ fn run_loop_with_stall<S: FrameSource, K: FrameSink>(
             win.encode += p.encode_time;
             if sink.offer(p.frame)? {
                 sum.sent += 1;
+                win.sent += 1;
                 refused_run = 0;
                 refused_since = None;
             } else {
@@ -595,8 +645,19 @@ fn run_loop_with_stall<S: FrameSource, K: FrameSink>(
         }
         if win.start.elapsed() >= STATS_PERIOD {
             let secs = win.start.elapsed().as_secs_f64();
-            let fields = format!("{}{}", src.stats_fields(secs), extra());
-            eprintln!("{}", win.line(&sum, &fields));
+            let stage = src.stats_fields(secs);
+            let ext = extra();
+            report(&Tick {
+                secs,
+                encoded: win.frames,
+                sent: win.sent,
+                bytes: win.bytes,
+                enc_ms: win.enc_ms(),
+                total_sent: sum.sent,
+                total_dropped: sum.dropped,
+                fields: format!("{stage}{}", ext.fields),
+                ipad_decode_ms: ext.ipad_decode_ms,
+            });
             win = Window::new();
         }
     }
@@ -673,7 +734,8 @@ mod tests {
             &mut Refuse,
             &force,
             &mut stop,
-            &String::new,
+            &Extra::default,
+            &mut |_: &Tick| {},
         )
         .unwrap();
         assert_eq!(sum.produced, 2);
@@ -881,7 +943,8 @@ mod tests {
             &mut Refuse,
             &force,
             &mut || false,
-            &String::new,
+            &Extra::default,
+            &mut |_: &Tick| {},
             Duration::from_millis(50),
         )
         .unwrap_err();
@@ -916,12 +979,32 @@ mod tests {
             &mut Alternating { n: 0 },
             &force,
             &mut stop,
-            &String::new,
+            &Extra::default,
+            &mut |_: &Tick| {},
             Duration::from_millis(50),
         )
         .unwrap();
         assert_eq!(sum.sent, 5);
         assert_eq!(sum.dropped, 5);
+    }
+
+    #[test]
+    fn verbose_line_has_every_field() {
+        let tick = Tick {
+            secs: 2.0,
+            encoded: 120,
+            sent: 118,
+            bytes: 2_000_000,
+            enc_ms: 4.5,
+            total_sent: 300,
+            total_dropped: 2,
+            fields: " cap_fps=60.0".to_string(),
+            ipad_decode_ms: Some(8.0),
+        };
+        assert_eq!(
+            verbose_line(&tick),
+            "fps=60.0 enc_ms=4.50 kbps=8000 sent=300 dropped=2 cap_fps=60.0"
+        );
     }
 
     #[test]
